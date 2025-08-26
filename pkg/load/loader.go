@@ -1,0 +1,480 @@
+package load
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"sync"
+	"time"
+
+	"elasticetl/pkg/config"
+	"elasticetl/pkg/transform"
+)
+
+// Loader handles data loading to various destinations
+type Loader struct {
+	config  config.LoadConfig
+	streams []Stream
+	mutex   sync.RWMutex
+}
+
+// Stream interface for different load destinations
+type Stream interface {
+	Load(ctx context.Context, results []*transform.TransformedResult) error
+	Close() error
+	GetType() string
+}
+
+// NewLoader creates a new loader
+func NewLoader(cfg config.LoadConfig) (*Loader, error) {
+	loader := &Loader{
+		config: cfg,
+	}
+
+	// Initialize streams
+	for _, streamCfg := range cfg.Streams {
+		stream, err := createStream(streamCfg)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create stream %s: %w", streamCfg.Type, err)
+		}
+		loader.streams = append(loader.streams, stream)
+	}
+
+	return loader, nil
+}
+
+// Load loads data to all configured streams
+func (l *Loader) Load(ctx context.Context, results []*transform.TransformedResult) error {
+	l.mutex.RLock()
+	streams := make([]Stream, len(l.streams))
+	copy(streams, l.streams)
+	l.mutex.RUnlock()
+
+	var wg sync.WaitGroup
+	errorsChan := make(chan error, len(streams))
+
+	// Load to all streams concurrently
+	for _, stream := range streams {
+		wg.Add(1)
+		go func(s Stream) {
+			defer wg.Done()
+			if err := s.Load(ctx, results); err != nil {
+				errorsChan <- fmt.Errorf("stream %s: %w", s.GetType(), err)
+			}
+		}(stream)
+	}
+
+	// Wait for all loads to complete
+	go func() {
+		wg.Wait()
+		close(errorsChan)
+	}()
+
+	// Collect errors
+	var errors []error
+	for err := range errorsChan {
+		errors = append(errors, err)
+	}
+
+	if len(errors) > 0 {
+		return fmt.Errorf("load errors: %v", errors)
+	}
+
+	return nil
+}
+
+// Close closes all streams
+func (l *Loader) Close() error {
+	l.mutex.Lock()
+	defer l.mutex.Unlock()
+
+	var errors []error
+	for _, stream := range l.streams {
+		if err := stream.Close(); err != nil {
+			errors = append(errors, err)
+		}
+	}
+
+	if len(errors) > 0 {
+		return fmt.Errorf("close errors: %v", errors)
+	}
+
+	return nil
+}
+
+// UpdateConfig updates the loader configuration
+func (l *Loader) UpdateConfig(cfg config.LoadConfig) error {
+	l.mutex.Lock()
+	defer l.mutex.Unlock()
+
+	// Close existing streams
+	for _, stream := range l.streams {
+		stream.Close()
+	}
+
+	// Create new streams
+	l.streams = nil
+	for _, streamCfg := range cfg.Streams {
+		stream, err := createStream(streamCfg)
+		if err != nil {
+			return fmt.Errorf("failed to create stream %s: %w", streamCfg.Type, err)
+		}
+		l.streams = append(l.streams, stream)
+	}
+
+	l.config = cfg
+	return nil
+}
+
+// createStream creates a stream based on configuration
+func createStream(cfg config.StreamConfig) (Stream, error) {
+	switch cfg.Type {
+	case "gem":
+		return NewGEMStream(cfg.Config)
+	case "otel":
+		return NewOTELStream(cfg.Config)
+	case "prometheus":
+		return NewPrometheusStream(cfg.Config)
+	default:
+		return nil, fmt.Errorf("unsupported stream type: %s", cfg.Type)
+	}
+}
+
+// GEMStream handles loading to GEM with Prometheus remote write
+type GEMStream struct {
+	endpoint   string
+	httpClient *http.Client
+}
+
+// NewGEMStream creates a new GEM stream
+func NewGEMStream(config map[string]interface{}) (*GEMStream, error) {
+	endpoint, ok := config["endpoint"].(string)
+	if !ok {
+		return nil, fmt.Errorf("gem stream requires 'endpoint' configuration")
+	}
+
+	timeout := 30 * time.Second
+	if t, ok := config["timeout"].(string); ok {
+		if parsed, err := time.ParseDuration(t); err == nil {
+			timeout = parsed
+		}
+	}
+
+	return &GEMStream{
+		endpoint: endpoint,
+		httpClient: &http.Client{
+			Timeout: timeout,
+		},
+	}, nil
+}
+
+// Load loads data to GEM
+func (g *GEMStream) Load(ctx context.Context, results []*transform.TransformedResult) error {
+	// Convert results to Prometheus remote write format
+	samples := g.convertToPrometheusSamples(results)
+	if len(samples) == 0 {
+		return nil
+	}
+
+	// Create remote write request
+	writeRequest := map[string]interface{}{
+		"timeseries": samples,
+	}
+
+	jsonData, err := json.Marshal(writeRequest)
+	if err != nil {
+		return fmt.Errorf("failed to marshal prometheus data: %w", err)
+	}
+
+	// Send to GEM endpoint
+	req, err := http.NewRequestWithContext(ctx, "POST", g.endpoint, bytes.NewBuffer(jsonData))
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Prometheus-Remote-Write-Version", "0.1.0")
+
+	resp, err := g.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to send request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		return fmt.Errorf("GEM returned status %d", resp.StatusCode)
+	}
+
+	return nil
+}
+
+// convertToPrometheusSamples converts transformed results to Prometheus samples
+func (g *GEMStream) convertToPrometheusSamples(results []*transform.TransformedResult) []map[string]interface{} {
+	var samples []map[string]interface{}
+
+	for _, result := range results {
+		timestamp := result.Timestamp.UnixMilli()
+
+		for key, value := range result.TransformedData {
+			// Only include numeric values as metrics
+			if numValue, ok := g.toFloat64(value); ok {
+				sample := map[string]interface{}{
+					"labels": []map[string]string{
+						{
+							"__name__": key,
+							"source":   result.Source,
+						},
+					},
+					"samples": []map[string]interface{}{
+						{
+							"value":     numValue,
+							"timestamp": timestamp,
+						},
+					},
+				}
+				samples = append(samples, sample)
+			}
+		}
+	}
+
+	return samples
+}
+
+// toFloat64 converts a value to float64 if possible
+func (g *GEMStream) toFloat64(value interface{}) (float64, bool) {
+	switch v := value.(type) {
+	case float64:
+		return v, true
+	case int:
+		return float64(v), true
+	case int64:
+		return float64(v), true
+	default:
+		return 0, false
+	}
+}
+
+// Close closes the GEM stream
+func (g *GEMStream) Close() error {
+	return nil
+}
+
+// GetType returns the stream type
+func (g *GEMStream) GetType() string {
+	return "gem"
+}
+
+// OTELStream handles loading to OpenTelemetry collector
+type OTELStream struct {
+	endpoint   string
+	httpClient *http.Client
+}
+
+// NewOTELStream creates a new OTEL stream
+func NewOTELStream(config map[string]interface{}) (*OTELStream, error) {
+	endpoint, ok := config["endpoint"].(string)
+	if !ok {
+		return nil, fmt.Errorf("otel stream requires 'endpoint' configuration")
+	}
+
+	timeout := 30 * time.Second
+	if t, ok := config["timeout"].(string); ok {
+		if parsed, err := time.ParseDuration(t); err == nil {
+			timeout = parsed
+		}
+	}
+
+	return &OTELStream{
+		endpoint: endpoint,
+		httpClient: &http.Client{
+			Timeout: timeout,
+		},
+	}, nil
+}
+
+// Load loads data to OTEL collector
+func (o *OTELStream) Load(ctx context.Context, results []*transform.TransformedResult) error {
+	// Convert results to OTEL format
+	otelData := o.convertToOTELFormat(results)
+
+	jsonData, err := json.Marshal(otelData)
+	if err != nil {
+		return fmt.Errorf("failed to marshal OTEL data: %w", err)
+	}
+
+	// Send to OTEL collector
+	req, err := http.NewRequestWithContext(ctx, "POST", o.endpoint, bytes.NewBuffer(jsonData))
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := o.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to send request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		return fmt.Errorf("OTEL collector returned status %d", resp.StatusCode)
+	}
+
+	return nil
+}
+
+// convertToOTELFormat converts results to OTEL format
+func (o *OTELStream) convertToOTELFormat(results []*transform.TransformedResult) map[string]interface{} {
+	var metrics []map[string]interface{}
+
+	for _, result := range results {
+		metric := map[string]interface{}{
+			"name":        "elasticetl_metric",
+			"description": "Metric from ElasticETL",
+			"unit":        "1",
+			"data": map[string]interface{}{
+				"dataPoints": []map[string]interface{}{
+					{
+						"attributes": map[string]interface{}{
+							"source": result.Source,
+						},
+						"timeUnixNano": result.Timestamp.UnixNano(),
+						"value":        result.TransformedData,
+					},
+				},
+			},
+		}
+		metrics = append(metrics, metric)
+	}
+
+	return map[string]interface{}{
+		"resourceMetrics": []map[string]interface{}{
+			{
+				"resource": map[string]interface{}{
+					"attributes": []map[string]interface{}{
+						{
+							"key":   "service.name",
+							"value": map[string]string{"stringValue": "elasticetl"},
+						},
+					},
+				},
+				"scopeMetrics": []map[string]interface{}{
+					{
+						"scope": map[string]interface{}{
+							"name":    "elasticetl",
+							"version": "1.0.0",
+						},
+						"metrics": metrics,
+					},
+				},
+			},
+		},
+	}
+}
+
+// Close closes the OTEL stream
+func (o *OTELStream) Close() error {
+	return nil
+}
+
+// GetType returns the stream type
+func (o *OTELStream) GetType() string {
+	return "otel"
+}
+
+// PrometheusStream handles loading to Prometheus
+type PrometheusStream struct {
+	endpoint   string
+	httpClient *http.Client
+}
+
+// NewPrometheusStream creates a new Prometheus stream
+func NewPrometheusStream(config map[string]interface{}) (*PrometheusStream, error) {
+	endpoint, ok := config["endpoint"].(string)
+	if !ok {
+		return nil, fmt.Errorf("prometheus stream requires 'endpoint' configuration")
+	}
+
+	timeout := 30 * time.Second
+	if t, ok := config["timeout"].(string); ok {
+		if parsed, err := time.ParseDuration(t); err == nil {
+			timeout = parsed
+		}
+	}
+
+	return &PrometheusStream{
+		endpoint: endpoint,
+		httpClient: &http.Client{
+			Timeout: timeout,
+		},
+	}, nil
+}
+
+// Load loads data to Prometheus
+func (p *PrometheusStream) Load(ctx context.Context, results []*transform.TransformedResult) error {
+	// Convert to Prometheus exposition format
+	metricsText := p.convertToPrometheusFormat(results)
+
+	// Send to Prometheus pushgateway
+	req, err := http.NewRequestWithContext(ctx, "POST", p.endpoint, bytes.NewBufferString(metricsText))
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("Content-Type", "text/plain")
+
+	resp, err := p.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to send request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		return fmt.Errorf("Prometheus returned status %d", resp.StatusCode)
+	}
+
+	return nil
+}
+
+// convertToPrometheusFormat converts results to Prometheus exposition format
+func (p *PrometheusStream) convertToPrometheusFormat(results []*transform.TransformedResult) string {
+	var lines []string
+
+	for _, result := range results {
+		for key, value := range result.TransformedData {
+			if numValue, ok := p.toFloat64(value); ok {
+				line := fmt.Sprintf(`%s{source="%s"} %f %d`,
+					key, result.Source, numValue, result.Timestamp.UnixMilli())
+				lines = append(lines, line)
+			}
+		}
+	}
+
+	return fmt.Sprintf("%s\n", fmt.Sprintf("%s", lines))
+}
+
+// toFloat64 converts a value to float64 if possible
+func (p *PrometheusStream) toFloat64(value interface{}) (float64, bool) {
+	switch v := value.(type) {
+	case float64:
+		return v, true
+	case int:
+		return float64(v), true
+	case int64:
+		return float64(v), true
+	default:
+		return 0, false
+	}
+}
+
+// Close closes the Prometheus stream
+func (p *PrometheusStream) Close() error {
+	return nil
+}
+
+// GetType returns the stream type
+func (p *PrometheusStream) GetType() string {
+	return "prometheus"
+}

@@ -1,0 +1,171 @@
+pipelines:
+  - name: elasticsearch-metrics
+    enabled: true
+    interval: 5m
+    extract:
+      elasticsearch_query: |
+        {
+          "query": {
+            "bool": {
+              "must": [
+                {
+                  "range": {
+                    "@timestamp": {
+                      "gte": __STARTTIME__,
+                      "lte": __ENDTIME__
+                    }
+                  }
+                },
+                {
+                  "term": {
+                    "cluster.name": "__CLUSTER__"
+                  }
+                }
+              ]
+            }
+          },
+          "aggs": {
+            "avg_response_time": {
+              "avg": {
+                "field": "response_time"
+              }
+            },
+            "total_requests": {
+              "value_count": {
+                "field": "request_id"
+              }
+            }
+          }
+        }
+      urls:
+        - http://localhost:9200/logs-*
+      cluster_names:
+        - production
+      auth_headers:
+        - "Bearer your-token-here"
+      additional_headers:
+        - ["X-Custom-Header: custom-value", "X-Another-Header: another-value"]
+      json_paths:
+        - aggregations.avg_response_time.value
+        - aggregations.total_requests.value
+        - hits.total.value
+      interval: 5m
+      timeout: 30s
+      max_retries: 3
+      start_time: NOW-5min
+      end_time: NOW
+    transform:
+      stateless: false
+      substitute_zeros_for_null: true
+      previous_results_sets: 5
+      conversion_functions:
+        - field: value
+          function: convert_type
+          from_type: string
+          to_type: float
+        - field: response_time_ms
+          function: convert_to_mb
+          from_unit: bytes
+    load:
+      streams:
+        - type: prometheus
+          config:
+            endpoint: http://localhost:9091/metrics/job/elasticetl/instance/localhost
+            timeout: 30s
+        - type: otel
+          config:
+            endpoint: http://localhost:4318/v1/metrics
+            timeout: 30s
+
+  - name: system-monitoring
+    enabled: true
+    interval: 1m
+    extract:
+      elasticsearch_query: |
+        {
+          "query": {
+            "bool": {
+              "must": [
+                {
+                  "term": {
+                    "service.name": "system"
+                  }
+                },
+                {
+                  "term": {
+                    "cluster.name": "__CLUSTER__"
+                  }
+                },
+                {
+                  "range": {
+                    "@timestamp": {
+                      "gte": __STARTTIME__
+                    }
+                  }
+                }
+              ]
+            }
+          },
+          "aggs": {
+            "avg_cpu": {
+              "avg": {
+                "field": "system.cpu.percent"
+              }
+            },
+            "avg_memory": {
+              "avg": {
+                "field": "system.memory.percent"
+              }
+            }
+          }
+        }
+      urls:
+        - http://localhost:9200/metricbeat-*
+      cluster_names:
+        - monitoring
+      auth_headers:
+        - ""
+      additional_headers:
+        - []
+      json_paths:
+        - aggregations.avg_cpu.value
+        - aggregations.avg_memory.value
+      interval: 1m
+      timeout: 15s
+      max_retries: 2
+      start_time: NOW-1min
+    transform:
+      stateless: true
+      substitute_zeros_for_null: true
+      previous_results_sets: 0
+      conversion_functions:
+        - field: avg_cpu
+          function: convert_type
+          from_type: string
+          to_type: float
+        - field: avg_memory
+          function: convert_type
+          from_type: string
+          to_type: float
+    load:
+      streams:
+        - type: gem
+          config:
+            endpoint: http://localhost:8080/api/v1/write
+            timeout: 30s
+
+global:
+  resource_limits:
+    max_memory_mb: 512
+    max_cpu_percent: 80
+    max_goroutines: 100
+    max_connections: 50
+  metrics:
+    enabled: true
+    port: 8090
+    path: /metrics
+    interval: 30s
+  logging:
+    level: info
+    format: text
+    output: stdout

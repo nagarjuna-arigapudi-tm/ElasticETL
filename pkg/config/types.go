@@ -34,6 +34,7 @@ type ExtractConfig struct {
 	StartTime          string        `json:"start_time,omitempty" yaml:"start_time,omitempty"`
 	EndTime            string        `json:"end_time,omitempty" yaml:"end_time,omitempty"`
 	InsecureTLS        bool          `json:"insecure_tls,omitempty" yaml:"insecure_tls,omitempty"`
+	Debug              DebugConfig   `json:"debug,omitempty" yaml:"debug,omitempty"`
 }
 
 // TransformConfig contains transformation configuration
@@ -61,10 +62,11 @@ type LoadConfig struct {
 
 // StreamConfig defines a single load stream
 type StreamConfig struct {
-	Type        string                 `json:"type" yaml:"type"` // gem, otel, prometheus
+	Type        string                 `json:"type" yaml:"type"` // gem, otel, prometheus, debug
 	Config      map[string]interface{} `json:"config" yaml:"config"`
 	BasicAuth   *BasicAuthConfig       `json:"basic_auth,omitempty" yaml:"basic_auth,omitempty"`
 	InsecureTLS bool                   `json:"insecure_tls,omitempty" yaml:"insecure_tls,omitempty"`
+	Labels      map[string]string      `json:"labels,omitempty" yaml:"labels,omitempty"`
 }
 
 // BasicAuthConfig defines basic authentication configuration
@@ -102,4 +104,10 @@ type LoggingConfig struct {
 	Format string `json:"format" yaml:"format"` // json, text
 	Output string `json:"output" yaml:"output"` // stdout, file
 	File   string `json:"file,omitempty" yaml:"file,omitempty"`
+}
+
+// DebugConfig defines debug settings for extraction phase
+type DebugConfig struct {
+	Enabled bool   `json:"enabled" yaml:"enabled"`
+	Path    string `json:"path,omitempty" yaml:"path,omitempty"`
 }

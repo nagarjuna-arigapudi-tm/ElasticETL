@@ -4,7 +4,7 @@ import (
 	"elasticetl/pkg/utils"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
+	"os"
 	"path/filepath"
 	"sync"
 	"time"
@@ -77,7 +77,7 @@ func (l *Loader) Close() error {
 
 // loadConfig loads configuration from file
 func (l *Loader) loadConfig() error {
-	data, err := ioutil.ReadFile(l.configPath)
+	data, err := os.ReadFile(l.configPath)
 	if err != nil {
 		return fmt.Errorf("failed to read config file: %w", err)
 	}

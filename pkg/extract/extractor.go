@@ -5,8 +5,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -118,6 +120,13 @@ func (e *Extractor) Extract(ctx context.Context) ([]*Result, error) {
 		return nil, fmt.Errorf("all extractions failed: %v", errors)
 	}
 
+	// Debug output after extract phase if enabled
+	if e.config.Debug.Enabled && e.config.Debug.Path != "" {
+		if err := e.writeDebugOutput(results); err != nil {
+			fmt.Printf("Failed to write debug output: %v\n", err)
+		}
+	}
+
 	return results, nil
 }
 
@@ -187,12 +196,12 @@ func (e *Extractor) extractFromEndpoint(ctx context.Context, index int) (*Result
 	defer resp.Body.Close()
 
 	if resp.StatusCode >= 400 {
-		body, _ := ioutil.ReadAll(resp.Body)
+		body, _ := io.ReadAll(resp.Body)
 		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
 	}
 
 	// Read response
-	body, err := ioutil.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read response: %w", err)
 	}
@@ -271,4 +280,40 @@ func (e *Extractor) UpdateConfig(cfg config.ExtractConfig) {
 	e.config = cfg
 	e.httpClient.Timeout = cfg.Timeout
 	e.macroSubstituter = utils.NewMacroSubstituter(cfg.StartTime, cfg.EndTime)
+}
+
+// writeDebugOutput writes extraction results to debug file
+func (e *Extractor) writeDebugOutput(results []*Result) error {
+	// Create debug directory if it doesn't exist
+	debugDir := filepath.Dir(e.config.Debug.Path)
+	if err := os.MkdirAll(debugDir, 0755); err != nil {
+		return fmt.Errorf("failed to create debug directory: %w", err)
+	}
+
+	// Create debug output with timestamp
+	debugData := map[string]interface{}{
+		"timestamp":     time.Now().Format(time.RFC3339),
+		"pipeline":      "extract",
+		"results_count": len(results),
+		"results":       results,
+	}
+
+	// Marshal to JSON
+	jsonData, err := json.MarshalIndent(debugData, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal debug data: %w", err)
+	}
+
+	// Generate filename with timestamp
+	timestamp := time.Now().Format("20060102_150405")
+	filename := fmt.Sprintf("%s_extract_%s.json", filepath.Base(e.config.Debug.Path), timestamp)
+	fullPath := filepath.Join(debugDir, filename)
+
+	// Write to file
+	if err := os.WriteFile(fullPath, jsonData, 0644); err != nil {
+		return fmt.Errorf("failed to write debug file: %w", err)
+	}
+
+	fmt.Printf("Debug output written to: %s\n", fullPath)
+	return nil
 }

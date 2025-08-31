@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -132,11 +134,13 @@ func (l *Loader) UpdateConfig(cfg config.LoadConfig) error {
 func createStream(cfg config.StreamConfig) (Stream, error) {
 	switch cfg.Type {
 	case "gem":
-		return NewGEMStream(cfg.Config)
+		return NewGEMStream(cfg.Config, cfg.Labels)
 	case "otel":
-		return NewOTELStream(cfg.Config)
+		return NewOTELStream(cfg.Config, cfg.Labels)
 	case "prometheus":
-		return NewPrometheusStream(cfg.Config)
+		return NewPrometheusStream(cfg.Config, cfg.Labels)
+	case "debug":
+		return NewDebugStream(cfg.Config)
 	default:
 		return nil, fmt.Errorf("unsupported stream type: %s", cfg.Type)
 	}
@@ -146,10 +150,11 @@ func createStream(cfg config.StreamConfig) (Stream, error) {
 type GEMStream struct {
 	endpoint   string
 	httpClient *http.Client
+	labels     map[string]string
 }
 
 // NewGEMStream creates a new GEM stream
-func NewGEMStream(config map[string]interface{}) (*GEMStream, error) {
+func NewGEMStream(config map[string]interface{}, labels map[string]string) (*GEMStream, error) {
 	endpoint, ok := config["endpoint"].(string)
 	if !ok {
 		return nil, fmt.Errorf("gem stream requires 'endpoint' configuration")
@@ -164,6 +169,7 @@ func NewGEMStream(config map[string]interface{}) (*GEMStream, error) {
 
 	return &GEMStream{
 		endpoint: endpoint,
+		labels:   labels,
 		httpClient: &http.Client{
 			Timeout: timeout,
 		},
@@ -220,13 +226,24 @@ func (g *GEMStream) convertToPrometheusSamples(results []*transform.TransformedR
 		for key, value := range result.TransformedData {
 			// Only include numeric values as metrics
 			if numValue, ok := g.toFloat64(value); ok {
+				// Create labels map starting with metric name and source
+				labels := map[string]string{
+					"__name__": key,
+					"source":   result.Source,
+				}
+
+				// Add cluster name from metadata if available
+				if clusterName, ok := result.Metadata["cluster_name"].(string); ok && clusterName != "" {
+					labels["cluster"] = clusterName
+				}
+
+				// Add configured labels
+				for labelKey, labelValue := range g.labels {
+					labels[labelKey] = labelValue
+				}
+
 				sample := map[string]interface{}{
-					"labels": []map[string]string{
-						{
-							"__name__": key,
-							"source":   result.Source,
-						},
-					},
+					"labels": []map[string]string{labels},
 					"samples": []map[string]interface{}{
 						{
 							"value":     numValue,
@@ -270,10 +287,11 @@ func (g *GEMStream) GetType() string {
 type OTELStream struct {
 	endpoint   string
 	httpClient *http.Client
+	labels     map[string]string
 }
 
 // NewOTELStream creates a new OTEL stream
-func NewOTELStream(config map[string]interface{}) (*OTELStream, error) {
+func NewOTELStream(config map[string]interface{}, labels map[string]string) (*OTELStream, error) {
 	endpoint, ok := config["endpoint"].(string)
 	if !ok {
 		return nil, fmt.Errorf("otel stream requires 'endpoint' configuration")
@@ -288,6 +306,7 @@ func NewOTELStream(config map[string]interface{}) (*OTELStream, error) {
 
 	return &OTELStream{
 		endpoint: endpoint,
+		labels:   labels,
 		httpClient: &http.Client{
 			Timeout: timeout,
 		},
@@ -330,6 +349,21 @@ func (o *OTELStream) convertToOTELFormat(results []*transform.TransformedResult)
 	var metrics []map[string]interface{}
 
 	for _, result := range results {
+		// Create attributes map with source
+		attributes := map[string]interface{}{
+			"source": result.Source,
+		}
+
+		// Add cluster name from metadata if available
+		if clusterName, ok := result.Metadata["cluster_name"].(string); ok && clusterName != "" {
+			attributes["cluster"] = clusterName
+		}
+
+		// Add configured labels as attributes
+		for labelKey, labelValue := range o.labels {
+			attributes[labelKey] = labelValue
+		}
+
 		metric := map[string]interface{}{
 			"name":        "elasticetl_metric",
 			"description": "Metric from ElasticETL",
@@ -337,9 +371,7 @@ func (o *OTELStream) convertToOTELFormat(results []*transform.TransformedResult)
 			"data": map[string]interface{}{
 				"dataPoints": []map[string]interface{}{
 					{
-						"attributes": map[string]interface{}{
-							"source": result.Source,
-						},
+						"attributes":   attributes,
 						"timeUnixNano": result.Timestamp.UnixNano(),
 						"value":        result.TransformedData,
 					},
@@ -388,10 +420,11 @@ func (o *OTELStream) GetType() string {
 type PrometheusStream struct {
 	endpoint   string
 	httpClient *http.Client
+	labels     map[string]string
 }
 
 // NewPrometheusStream creates a new Prometheus stream
-func NewPrometheusStream(config map[string]interface{}) (*PrometheusStream, error) {
+func NewPrometheusStream(config map[string]interface{}, labels map[string]string) (*PrometheusStream, error) {
 	endpoint, ok := config["endpoint"].(string)
 	if !ok {
 		return nil, fmt.Errorf("prometheus stream requires 'endpoint' configuration")
@@ -406,6 +439,7 @@ func NewPrometheusStream(config map[string]interface{}) (*PrometheusStream, erro
 
 	return &PrometheusStream{
 		endpoint: endpoint,
+		labels:   labels,
 		httpClient: &http.Client{
 			Timeout: timeout,
 		},
@@ -445,8 +479,22 @@ func (p *PrometheusStream) convertToPrometheusFormat(results []*transform.Transf
 	for _, result := range results {
 		for key, value := range result.TransformedData {
 			if numValue, ok := p.toFloat64(value); ok {
-				line := fmt.Sprintf(`%s{source="%s"} %f %d`,
-					key, result.Source, numValue, result.Timestamp.UnixMilli())
+				// Build labels string
+				labelPairs := []string{fmt.Sprintf(`source="%s"`, result.Source)}
+
+				// Add cluster name from metadata if available
+				if clusterName, ok := result.Metadata["cluster_name"].(string); ok && clusterName != "" {
+					labelPairs = append(labelPairs, fmt.Sprintf(`cluster="%s"`, clusterName))
+				}
+
+				// Add configured labels
+				for labelKey, labelValue := range p.labels {
+					labelPairs = append(labelPairs, fmt.Sprintf(`%s="%s"`, labelKey, labelValue))
+				}
+
+				labelsStr := fmt.Sprintf("{%s}", fmt.Sprintf("%s", labelPairs))
+				line := fmt.Sprintf(`%s%s %f %d`,
+					key, labelsStr, numValue, result.Timestamp.UnixMilli())
 				lines = append(lines, line)
 			}
 		}
@@ -477,4 +525,67 @@ func (p *PrometheusStream) Close() error {
 // GetType returns the stream type
 func (p *PrometheusStream) GetType() string {
 	return "prometheus"
+}
+
+// DebugStream handles loading to debug files
+type DebugStream struct {
+	path string
+}
+
+// NewDebugStream creates a new debug stream
+func NewDebugStream(config map[string]interface{}) (*DebugStream, error) {
+	path, ok := config["path"].(string)
+	if !ok {
+		return nil, fmt.Errorf("debug stream requires 'path' configuration")
+	}
+
+	return &DebugStream{
+		path: path,
+	}, nil
+}
+
+// Load loads data to debug file
+func (d *DebugStream) Load(ctx context.Context, results []*transform.TransformedResult) error {
+	// Create debug directory if it doesn't exist
+	debugDir := filepath.Dir(d.path)
+	if err := os.MkdirAll(debugDir, 0755); err != nil {
+		return fmt.Errorf("failed to create debug directory: %w", err)
+	}
+
+	// Create debug output with timestamp
+	debugData := map[string]interface{}{
+		"timestamp":     time.Now().Format(time.RFC3339),
+		"pipeline":      "load",
+		"results_count": len(results),
+		"results":       results,
+	}
+
+	// Marshal to JSON
+	jsonData, err := json.MarshalIndent(debugData, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal debug data: %w", err)
+	}
+
+	// Generate filename with timestamp
+	timestamp := time.Now().Format("20060102_150405")
+	filename := fmt.Sprintf("%s_load_%s.json", filepath.Base(d.path), timestamp)
+	fullPath := filepath.Join(debugDir, filename)
+
+	// Write to file
+	if err := os.WriteFile(fullPath, jsonData, 0644); err != nil {
+		return fmt.Errorf("failed to write debug file: %w", err)
+	}
+
+	fmt.Printf("Debug load output written to: %s\n", fullPath)
+	return nil
+}
+
+// Close closes the debug stream
+func (d *DebugStream) Close() error {
+	return nil
+}
+
+// GetType returns the stream type
+func (d *DebugStream) GetType() string {
+	return "debug"
 }

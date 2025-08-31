@@ -48,6 +48,9 @@ ElasticETL supports dynamic macro substitution in queries:
 - **Prometheus Support**: Native Prometheus remote write and pushgateway support
 - **OpenTelemetry Integration**: Send metrics to OTEL collectors
 - **GEM Integration**: Support for GEM with Prometheus remote write
+- **Debug Output**: File-based debug output for both extract and load phases
+- **Automatic Labeling**: Automatic cluster name labeling for multi-cluster deployments
+- **Custom Labels**: Support for custom labels on all metrics
 - **Concurrent Loading**: Parallel loading to multiple streams
 
 ## Installation
@@ -271,9 +274,84 @@ Supported conversions:
   "config": {
     "endpoint": "http://localhost:8080/api/v1/write",
     "timeout": "30s"
+  },
+  "labels": {
+    "environment": "production",
+    "service": "elasticsearch-metrics",
+    "team": "platform"
   }
 }
 ```
+
+#### Debug Output
+```json
+{
+  "type": "debug",
+  "config": {
+    "path": "/tmp/elasticetl/debug/load"
+  }
+}
+```
+
+### Debug Capabilities
+
+ElasticETL provides comprehensive debug capabilities:
+
+#### Extract Phase Debug
+Enable debug output after the extract phase to inspect raw extracted data:
+
+```yaml
+extract:
+  # ... other extract config
+  debug:
+    enabled: true
+    path: /tmp/elasticetl/debug/extract
+```
+
+This creates timestamped JSON files with extraction results for debugging purposes.
+
+#### Load Phase Debug
+Use the debug stream type to output transformed data to files:
+
+```yaml
+load:
+  streams:
+    - type: debug
+      config:
+        path: /tmp/elasticetl/debug/load
+```
+
+### Automatic Cluster Labeling
+
+ElasticETL automatically adds cluster names as labels to all metrics, making it easy to distinguish data from different clusters:
+
+- **Prometheus**: Adds `cluster="cluster-name"` label
+- **OpenTelemetry**: Adds `cluster` attribute
+- **GEM**: Adds `cluster` label in remote write format
+
+This is particularly useful when running the same pipeline against multiple Elasticsearch clusters.
+
+### Custom Labels
+
+All load streams support custom labels that are applied to metrics:
+
+```yaml
+load:
+  streams:
+    - type: prometheus
+      config:
+        endpoint: "http://localhost:9091/metrics/job/elasticetl"
+      labels:
+        environment: production
+        service: elasticsearch-metrics
+        team: platform
+        region: us-west-2
+```
+
+Labels are automatically merged with:
+1. Source URL
+2. Cluster name (from `__CLUSTER__` macro)
+3. Custom configured labels
 
 ## Architecture
 

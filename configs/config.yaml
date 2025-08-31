@@ -54,6 +54,9 @@ pipelines:
       max_retries: 3
       start_time: NOW-5min
       end_time: NOW
+      debug:
+        enabled: true
+        path: /tmp/elasticetl/debug/extract
     transform:
       stateless: false
       substitute_zeros_for_null: true
@@ -72,10 +75,20 @@ pipelines:
           config:
             endpoint: http://localhost:9091/metrics/job/elasticetl/instance/localhost
             timeout: 30s
+          labels:
+            environment: production
+            service: elasticsearch-metrics
+            team: platform
         - type: otel
           config:
             endpoint: http://localhost:4318/v1/metrics
             timeout: 30s
+          labels:
+            environment: production
+            service: elasticsearch-metrics
+        - type: debug
+          config:
+            path: /tmp/elasticetl/debug/load
 
   - name: system-monitoring
     enabled: true

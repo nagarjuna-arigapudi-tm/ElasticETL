@@ -1,0 +1,267 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Build ElasticETL",
+            "type": "shell",
+            "command": "go",
+            "args": [
+                "build",
+                "-o",
+                "elasticetl",
+                "./cmd/elasticetl"
+            ],
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "presentation": {
+                "echo": true,
+                "reveal": "always",
+                "focus": false,
+                "panel": "shared",
+                "showReuseMessage": true,
+                "clear": false
+            },
+            "problemMatcher": [
+                "$go"
+            ]
+        },
+        {
+            "label": "Build and Run Debug",
+            "type": "shell",
+            "command": "go",
+            "args": [
+                "run",
+                "./cmd/elasticetl",
+                "-config",
+                "configs/config.yaml",
+                "-log-level",
+                "debug"
+            ],
+            "group": "build",
+            "presentation": {
+                "echo": true,
+                "reveal": "always",
+                "focus": true,
+                "panel": "shared",
+                "showReuseMessage": true,
+                "clear": true
+            },
+            "problemMatcher": [
+                "$go"
+            ]
+        },
+        {
+            "label": "Validate Configuration",
+            "type": "shell",
+            "command": "go",
+            "args": [
+                "run",
+                "./cmd/elasticetl",
+                "-config",
+                "configs/config.yaml",
+                "-validate-only"
+            ],
+            "group": "test",
+            "presentation": {
+                "echo": true,
+                "reveal": "always",
+                "focus": false,
+                "panel": "shared",
+                "showReuseMessage": true,
+                "clear": false
+            },
+            "problemMatcher": [
+                "$go"
+            ]
+        },
+        {
+            "label": "Run Tests",
+            "type": "shell",
+            "command": "go",
+            "args": [
+                "test",
+                "./..."
+            ],
+            "group": {
+                "kind": "test",
+                "isDefault": true
+            },
+            "presentation": {
+                "echo": true,
+                "reveal": "always",
+                "focus": false,
+                "panel": "shared",
+                "showReuseMessage": true,
+                "clear": false
+            },
+            "problemMatcher": [
+                "$go"
+            ]
+        },
+        {
+            "label": "Setup Debug Directories",
+            "type": "shell",
+            "command": "mkdir",
+            "args": [
+                "-p",
+                "/tmp/elasticetl/debug/extract",
+                "/tmp/elasticetl/debug/load"
+            ],
+            "group": "build",
+            "presentation": {
+                "echo": true,
+                "reveal": "silent",
+                "focus": false,
+                "panel": "shared",
+                "showReuseMessage": false,
+                "clear": false
+            }
+        },
+        {
+            "label": "Clean Debug Files",
+            "type": "shell",
+            "command": "rm",
+            "args": [
+                "-rf",
+                "/tmp/elasticetl/debug/*"
+            ],
+            "group": "build",
+            "presentation": {
+                "echo": true,
+                "reveal": "silent",
+                "focus": false,
+                "panel": "shared",
+                "showReuseMessage": false,
+                "clear": false
+            }
+        },
+        {
+            "label": "View Extract Debug Files",
+            "type": "shell",
+            "command": "ls",
+            "args": [
+                "-la",
+                "/tmp/elasticetl/debug/extract/"
+            ],
+            "group": "build",
+            "presentation": {
+                "echo": true,
+                "reveal": "always",
+                "focus": false,
+                "panel": "shared",
+                "showReuseMessage": false,
+                "clear": false
+            }
+        },
+        {
+            "label": "View Load Debug Files",
+            "type": "shell",
+            "command": "ls",
+            "args": [
+                "-la",
+                "/tmp/elasticetl/debug/load/"
+            ],
+            "group": "build",
+            "presentation": {
+                "echo": true,
+                "reveal": "always",
+                "focus": false,
+                "panel": "shared",
+                "showReuseMessage": false,
+                "clear": false
+            }
+        },
+        {
+            "label": "Show Latest Extract Debug",
+            "type": "shell",
+            "command": "bash",
+            "args": [
+                "-c",
+                "find /tmp/elasticetl/debug/extract -name '*.json' -type f -exec ls -t {} + | head -1 | xargs cat | jq ."
+            ],
+            "group": "build",
+            "presentation": {
+                "echo": true,
+                "reveal": "always",
+                "focus": true,
+                "panel": "shared",
+                "showReuseMessage": false,
+                "clear": true
+            }
+        },
+        {
+            "label": "Show Latest Load Debug",
+            "type": "shell",
+            "command": "bash",
+            "args": [
+                "-c",
+                "find /tmp/elasticetl/debug/load -name '*.json' -type f -exec ls -t {} + | head -1 | xargs cat | jq ."
+            ],
+            "group": "build",
+            "presentation": {
+                "echo": true,
+                "reveal": "always",
+                "focus": true,
+                "panel": "shared",
+                "showReuseMessage": false,
+                "clear": true
+            }
+        },
+        {
+            "label": "Check Elasticsearch Connection",
+            "type": "shell",
+            "command": "curl",
+            "args": [
+                "-s",
+                "http://localhost:9200/_cluster/health"
+            ],
+            "group": "test",
+            "presentation": {
+                "echo": true,
+                "reveal": "always",
+                "focus": false,
+                "panel": "shared",
+                "showReuseMessage": false,
+                "clear": false
+            }
+        },
+        {
+            "label": "Check Metrics Endpoint",
+            "type": "shell",
+            "command": "curl",
+            "args": [
+                "-s",
+                "http://localhost:8090/metrics"
+            ],
+            "group": "test",
+            "presentation": {
+                "echo": true,
+                "reveal": "always",
+                "focus": false,
+                "panel": "shared",
+                "showReuseMessage": false,
+                "clear": false
+            }
+        },
+        {
+            "label": "Full Debug Setup",
+            "dependsOrder": "sequence",
+            "dependsOn": [
+                "Build ElasticETL",
+                "Setup Debug Directories",
+                "Clean Debug Files"
+            ],
+            "group": "build",
+            "presentation": {
+                "echo": true,
+                "reveal": "always",
+                "focus": false,
+                "panel": "shared",
+                "showReuseMessage": true,
+                "clear": false
+            }
+        }
+    ]
+}

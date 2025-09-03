@@ -1,0 +1,227 @@
+# ElasticETL Debug Example Configuration
+# This configuration demonstrates how to enable debugging features
+
+pipelines:
+  - name: debug-example-pipeline
+    enabled: true
+    interval: 30s
+    
+    extract:
+      # Sample Elasticsearch query with macros
+      elasticsearch_query: |
+        {
+          "query": {
+            "bool": {
+              "must": [
+                {
+                  "range": {
+                    "@timestamp": {
+                      "gte": __STARTTIME__,
+                      "lte": __ENDTIME__
+                    }
+                  }
+                },
+                {
+                  "term": {
+                    "cluster.name": "__CLUSTER__"
+                  }
+                }
+              ]
+            }
+          },
+          "aggs": {
+            "avg_response_time": {
+              "avg": {
+                "field": "response_time"
+              }
+            },
+            "total_requests": {
+              "value_count": {
+                "field": "request_id"
+              }
+            },
+            "error_count": {
+              "filter": {
+                "term": {
+                  "status": "error"
+                }
+              }
+            }
+          }
+        }
+      
+      # Multiple endpoints for testing
+      urls:
+        - http://localhost:9200/logs-*
+        - http://localhost:9200/metrics-*
+      
+      cluster_names:
+        - production
+        - staging
+      
+      # Optional authentication headers
+      auth_headers:
+        - "Bearer your-token-here"
+        - ""
+      
+      # Extract specific values using JSON paths
+      json_paths:
+        - aggregations.avg_response_time.value
+        - aggregations.total_requests.value
+        - aggregations.error_count.doc_count
+        - hits.total.value
+      
+      # Timing configuration
+      interval: 30s
+      timeout: 15s
+      max_retries: 2
+      start_time: NOW-5min
+      end_time: NOW
+      
+      # ENABLE EXTRACT DEBUG - This will create debug files after extraction
+      debug:
+        enabled: true
+        path: /tmp/elasticetl/debug/extract
+    
+    transform:
+      stateless: false
+      substitute_zeros_for_null: true
+      previous_results_sets: 3
+      
+      # Example transformation functions
+      conversion_functions:
+        - field: value
+          function: convert_type
+          from_type: string
+          to_type: float
+        - field: total_requests
+          function: convert_type
+          from_type: string
+          to_type: int
+        - field: response_time_bytes
+          function: convert_to_mb
+          from_unit: bytes
+    
+    load:
+      streams:
+        # DEBUG STREAM - This will create debug files after transformation
+        - type: debug
+          config:
+            path: /tmp/elasticetl/debug/load
+        
+        # Prometheus stream with custom labels
+        - type: prometheus
+          config:
+            endpoint: http://localhost:9091/metrics/job/elasticetl/instance/debug-example
+            timeout: 30s
+          labels:
+            environment: debug
+            service: elasticsearch-debug
+            team: platform
+            version: "1.0"
+        
+        # OTEL stream with custom labels
+        - type: otel
+          config:
+            endpoint: http://localhost:4318/v1/metrics
+            timeout: 30s
+          labels:
+            environment: debug
+            service: elasticsearch-debug
+            component: etl
+        
+        # GEM stream with custom labels
+        - type: gem
+          config:
+            endpoint: http://localhost:8080/api/v1/write
+            timeout: 30s
+          labels:
+            environment: debug
+            datacenter: local
+            application: elasticetl
+
+  # Second pipeline for comparison (without debug)
+  - name: normal-pipeline
+    enabled: false  # Disabled by default
+    interval: 1m
+    
+    extract:
+      elasticsearch_query: |
+        {
+          "query": {
+            "bool": {
+              "must": [
+                {
+                  "range": {
+                    "@timestamp": {
+                      "gte": __STARTTIME__
+                    }
+                  }
+                },
+                {
+                  "term": {
+                    "service.name": "api"
+                  }
+                }
+              ]
+            }
+          },
+          "aggs": {
+            "avg_cpu": {
+              "avg": {
+                "field": "system.cpu.percent"
+              }
+            }
+          }
+        }
+      
+      urls:
+        - http://localhost:9200/metricbeat-*
+      
+      cluster_names:
+        - monitoring
+      
+      json_paths:
+        - aggregations.avg_cpu.value
+      
+      start_time: NOW-1min
+      timeout: 10s
+      max_retries: 1
+      
+      # Debug disabled for this pipeline
+      debug:
+        enabled: false
+    
+    transform:
+      stateless: true
+      substitute_zeros_for_null: true
+      previous_results_sets: 0
+    
+    load:
+      streams:
+        - type: prometheus
+          config:
+            endpoint: http://localhost:9091/metrics/job/elasticetl-normal
+            timeout: 15s
+          labels:
+            environment: production
+            service: system-monitoring
+
+# Global configuration
+global:
+  resource_limits:
+    max_memory_mb: 256
+    max_cpu_percent: 50
+    max_goroutines: 20
+    max_connections: 10
+  
+  metrics:
+    enabled: true
+    port: 8090
+    path: /metrics
+    interval: 15s  # More frequent for debugging
+  
+  logging:
+    level: debug  # Enable debug logging
+    format: text
+    output: stdout

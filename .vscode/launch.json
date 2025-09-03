@@ -1,0 +1,114 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Debug ElasticETL",
+            "type": "go",
+            "request": "launch",
+            "mode": "auto",
+            "program": "${workspaceFolder}/cmd/elasticetl",
+            "args": [
+                "-config",
+                "configs/config.yaml",
+                "-log-level",
+                "debug"
+            ],
+            "env": {},
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "showLog": true
+        },
+        {
+            "name": "Debug ElasticETL with Custom Config",
+            "type": "go",
+            "request": "launch",
+            "mode": "auto",
+            "program": "${workspaceFolder}/cmd/elasticetl",
+            "args": [
+                "-config",
+                "examples/debug-example.yaml",
+                "-log-level",
+                "debug"
+            ],
+            "env": {},
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "showLog": true
+        },
+        {
+            "name": "Debug Single Pipeline",
+            "type": "go",
+            "request": "launch",
+            "mode": "auto",
+            "program": "${workspaceFolder}/cmd/elasticetl",
+            "args": [
+                "-config",
+                "configs/config.yaml",
+                "-pipeline",
+                "elasticsearch-metrics",
+                "-log-level",
+                "debug"
+            ],
+            "env": {},
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "showLog": true
+        },
+        {
+            "name": "Debug Extract Component",
+            "type": "go",
+            "request": "launch",
+            "mode": "debug",
+            "program": "${workspaceFolder}/cmd/elasticetl",
+            "args": [
+                "-config",
+                "examples/debug-example.yaml",
+                "-log-level",
+                "debug"
+            ],
+            "env": {},
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "showLog": true,
+            "stopOnEntry": false,
+            "trace": "verbose"
+        },
+        {
+            "name": "Test Configuration Only",
+            "type": "go",
+            "request": "launch",
+            "mode": "auto",
+            "program": "${workspaceFolder}/cmd/elasticetl",
+            "args": [
+                "-config",
+                "configs/config.yaml",
+                "-validate-only"
+            ],
+            "env": {},
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "showLog": true
+        },
+        {
+            "name": "Debug with Environment Variables",
+            "type": "go",
+            "request": "launch",
+            "mode": "auto",
+            "program": "${workspaceFolder}/cmd/elasticetl",
+            "args": [
+                "-config",
+                "configs/config.yaml",
+                "-log-level",
+                "debug"
+            ],
+            "env": {
+                "ELASTICSEARCH_URL": "http://localhost:9200",
+                "PROMETHEUS_URL": "http://localhost:9091",
+                "DEBUG_ENABLED": "true"
+            },
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "showLog": true
+        }
+    ]
+}

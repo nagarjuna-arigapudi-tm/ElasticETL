@@ -1,0 +1,246 @@
+# ElasticETL Configuration with JSON Flattening and CSV Output
+# This configuration demonstrates the new features:
+# - Single JSON path extraction with flattening
+# - Filtering of flattened keys
+# - CSV output format
+# - Label columns for metrics
+
+pipelines:
+  - name: elasticsearch-logs-csv
+    enabled: true
+    interval: 2m
+    
+    extract:
+      # Elasticsearch query to get log data
+      elasticsearch_query: |
+        {
+          "query": {
+            "bool": {
+              "must": [
+                {
+                  "range": {
+                    "@timestamp": {
+                      "gte": __STARTTIME__,
+                      "lte": __ENDTIME__
+                    }
+                  }
+                },
+                {
+                  "term": {
+                    "cluster.name": "__CLUSTER__"
+                  }
+                }
+              ]
+            }
+          },
+          "aggs": {
+            "services": {
+              "terms": {
+                "field": "service.name",
+                "size": 10
+              },
+              "aggs": {
+                "avg_response_time": {
+                  "avg": {
+                    "field": "response_time"
+                  }
+                },
+                "error_count": {
+                  "filter": {
+                    "term": {
+                      "level": "ERROR"
+                    }
+                  }
+                },
+                "hosts": {
+                  "terms": {
+                    "field": "host.name",
+                    "size": 5
+                  },
+                  "aggs": {
+                    "cpu_usage": {
+                      "avg": {
+                        "field": "system.cpu.percent"
+                      }
+                    },
+                    "memory_usage": {
+                      "avg": {
+                        "field": "system.memory.percent"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      
+      # Multiple endpoints for different clusters
+      urls:
+        - http://localhost:9200/logs-*
+        - http://localhost:9201/logs-*
+      
+      cluster_names:
+        - production
+        - staging
+      
+      # Single JSON path to extract - will be flattened
+      json_path: aggregations.services.buckets
+      
+      # Filters to exclude certain flattened keys
+      filters:
+        - key: "*.doc_count_error_upper_bound"
+          exclude: true
+        - key: "*.sum_other_doc_count"
+          exclude: true
+        - key: "*[*].hosts.buckets[*].doc_count"
+          exclude: true
+      
+      # Timing configuration
+      interval: 2m
+      timeout: 30s
+      max_retries: 2
+      start_time: NOW-2min
+      end_time: NOW
+      
+      # Enable debug to see flattened structure
+      debug:
+        enabled: true
+        path: /tmp/elasticetl/debug/extract
+    
+    transform:
+      stateless: false
+      substitute_zeros_for_null: true
+      previous_results_sets: 2
+      output_format: csv  # Enable CSV output format
+      
+      # Transformation functions on flattened paths
+      conversion_functions:
+        - field: "[*].avg_response_time.value"
+          function: convert_type
+          from_type: string
+          to_type: float
+        - field: "[*].hosts.buckets[*].cpu_usage.value"
+          function: convert_type
+          from_type: string
+          to_type: float
+        - field: "[*].hosts.buckets[*].memory_usage.value"
+          function: convert_type
+          from_type: string
+          to_type: float
+    
+    load:
+      # Columns to use as labels when loading to TSDB
+      label_columns:
+        - "[*].key"  # service name
+        - "[*].hosts.buckets[*].key"  # host name
+      
+      streams:
+        # CSV output stream
+        - type: csv
+          config:
+            path: /tmp/elasticetl/output/services_metrics
+        
+        # Debug stream to see transformed data
+        - type: debug
+          config:
+            path: /tmp/elasticetl/debug/load
+        
+        # Prometheus stream with labels from CSV columns
+        - type: prometheus
+          config:
+            endpoint: http://localhost:9091/metrics/job/elasticetl-csv
+            timeout: 30s
+          labels:
+            environment: production
+            pipeline: csv-flattened
+            data_source: elasticsearch
+
+  # Second pipeline for comparison - traditional approach
+  - name: elasticsearch-simple
+    enabled: false  # Disabled by default
+    interval: 1m
+    
+    extract:
+      elasticsearch_query: |
+        {
+          "query": {
+            "bool": {
+              "must": [
+                {
+                  "range": {
+                    "@timestamp": {
+                      "gte": __STARTTIME__
+                    }
+                  }
+                },
+                {
+                  "term": {
+                    "cluster.name": "__CLUSTER__"
+                  }
+                }
+              ]
+            }
+          },
+          "aggs": {
+            "avg_cpu": {
+              "avg": {
+                "field": "system.cpu.percent"
+              }
+            }
+          }
+        }
+      
+      urls:
+        - http://localhost:9200/metricbeat-*
+      
+      cluster_names:
+        - monitoring
+      
+      # Single value extraction
+      json_path: aggregations.avg_cpu.value
+      
+      start_time: NOW-1min
+      timeout: 15s
+      max_retries: 1
+    
+    transform:
+      stateless: true
+      substitute_zeros_for_null: true
+      previous_results_sets: 0
+      output_format: json  # Traditional JSON format
+      
+      conversion_functions:
+        - field: value
+          function: convert_type
+          from_type: string
+          to_type: float
+    
+    load:
+      streams:
+        - type: prometheus
+          config:
+            endpoint: http://localhost:9091/metrics/job/elasticetl-simple
+            timeout: 15s
+          labels:
+            environment: monitoring
+            service: system-metrics
+
+# Global configuration
+global:
+  resource_limits:
+    max_memory_mb: 512
+    max_cpu_percent: 60
+    max_goroutines: 30
+    max_connections: 15
+  
+  metrics:
+    enabled: true
+    port: 8090
+    path: /metrics
+    interval: 20s
+  
+  logging:
+    level: info
+    format: text
+    output: stdout

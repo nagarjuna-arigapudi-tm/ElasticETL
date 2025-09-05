@@ -3,6 +3,7 @@ package transform
 import (
 	"fmt"
 	"reflect"
+	"sort"
 	"strconv"
 	"sync"
 
@@ -14,6 +15,8 @@ import (
 type TransformedResult struct {
 	*extract.Result
 	TransformedData map[string]interface{} `json:"transformed_data"`
+	CSVData         [][]string             `json:"csv_data,omitempty"`    // CSV format data
+	CSVHeaders      []string               `json:"csv_headers,omitempty"` // CSV column headers
 }
 
 // Transformer handles data transformation
@@ -41,6 +44,13 @@ func (t *Transformer) Transform(results []*extract.Result) ([]*TransformedResult
 			return nil, fmt.Errorf("failed to transform result from %s: %w", result.Source, err)
 		}
 		transformedResults = append(transformedResults, transformed)
+	}
+
+	// Convert to CSV format if requested
+	if t.config.OutputFormat == "csv" {
+		if err := t.convertToCSV(transformedResults); err != nil {
+			return nil, fmt.Errorf("failed to convert to CSV: %w", err)
+		}
 	}
 
 	// Store results if not stateless
@@ -283,6 +293,182 @@ func (t *Transformer) GetPreviousResults() [][]*TransformedResult {
 	result := make([][]*TransformedResult, len(t.previousResults))
 	copy(result, t.previousResults)
 	return result
+}
+
+// convertToCSV converts flattened data to CSV format
+func (t *Transformer) convertToCSV(results []*TransformedResult) error {
+	if len(results) == 0 {
+		return nil
+	}
+
+	// Collect all unique column names from all results
+	columnSet := make(map[string]bool)
+	for _, result := range results {
+		for key := range result.TransformedData {
+			columnSet[key] = true
+		}
+	}
+
+	// Convert to sorted slice for consistent column order
+	var columns []string
+	for col := range columnSet {
+		columns = append(columns, col)
+	}
+	sort.Strings(columns)
+
+	// Set headers for all results
+	for _, result := range results {
+		result.CSVHeaders = columns
+	}
+
+	// Convert each result to CSV rows
+	for _, result := range results {
+		rows := t.flattenToCSVRows(result.TransformedData, columns)
+		result.CSVData = rows
+	}
+
+	return nil
+}
+
+// flattenToCSVRows converts flattened data to CSV rows
+func (t *Transformer) flattenToCSVRows(data map[string]interface{}, columns []string) [][]string {
+	// Handle nested arrays that create multiple rows
+	maxRows := t.calculateMaxRows(data, columns)
+
+	if maxRows == 0 {
+		maxRows = 1 // At least one row
+	}
+
+	rows := make([][]string, maxRows)
+	for i := range rows {
+		rows[i] = make([]string, len(columns))
+	}
+
+	// Fill in the data
+	for colIdx, column := range columns {
+		values := t.extractColumnValues(data, column, maxRows)
+		for rowIdx, value := range values {
+			if rowIdx < maxRows {
+				rows[rowIdx][colIdx] = t.formatValue(value)
+			}
+		}
+	}
+
+	return rows
+}
+
+// calculateMaxRows determines how many CSV rows are needed based on array data
+func (t *Transformer) calculateMaxRows(data map[string]interface{}, columns []string) int {
+	maxRows := 1
+
+	for _, column := range columns {
+		if value, exists := data[column]; exists {
+			if arraySize := t.getArraySize(value); arraySize > maxRows {
+				maxRows = arraySize
+			}
+		}
+	}
+
+	return maxRows
+}
+
+// getArraySize returns the size of an array value, or 1 for non-arrays
+func (t *Transformer) getArraySize(value interface{}) int {
+	switch v := value.(type) {
+	case []interface{}:
+		return len(v)
+	case []string:
+		return len(v)
+	case []int:
+		return len(v)
+	case []float64:
+		return len(v)
+	default:
+		return 1
+	}
+}
+
+// extractColumnValues extracts values for a column, handling arrays and repetition
+func (t *Transformer) extractColumnValues(data map[string]interface{}, column string, maxRows int) []interface{} {
+	values := make([]interface{}, maxRows)
+
+	if value, exists := data[column]; exists {
+		switch v := value.(type) {
+		case []interface{}:
+			// Array values - each element goes to a different row
+			for i, item := range v {
+				if i < maxRows {
+					values[i] = item
+				}
+			}
+			// Fill remaining rows with empty values
+			for i := len(v); i < maxRows; i++ {
+				values[i] = ""
+			}
+		case []string:
+			for i, item := range v {
+				if i < maxRows {
+					values[i] = item
+				}
+			}
+			for i := len(v); i < maxRows; i++ {
+				values[i] = ""
+			}
+		case []int:
+			for i, item := range v {
+				if i < maxRows {
+					values[i] = item
+				}
+			}
+			for i := len(v); i < maxRows; i++ {
+				values[i] = ""
+			}
+		case []float64:
+			for i, item := range v {
+				if i < maxRows {
+					values[i] = item
+				}
+			}
+			for i := len(v); i < maxRows; i++ {
+				values[i] = ""
+			}
+		default:
+			// Single value - repeat for all rows
+			for i := 0; i < maxRows; i++ {
+				values[i] = value
+			}
+		}
+	} else {
+		// Column doesn't exist - fill with empty values
+		for i := 0; i < maxRows; i++ {
+			values[i] = ""
+		}
+	}
+
+	return values
+}
+
+// formatValue converts a value to string for CSV
+func (t *Transformer) formatValue(value interface{}) string {
+	if value == nil {
+		return ""
+	}
+
+	switch v := value.(type) {
+	case string:
+		return v
+	case int, int64, int32:
+		return fmt.Sprintf("%d", v)
+	case float64, float32:
+		return fmt.Sprintf("%g", v)
+	case bool:
+		if v {
+			return "true"
+		}
+		return "false"
+	default:
+		return fmt.Sprintf("%v", v)
+	}
 }
 
 // UpdateConfig updates the transformer configuration

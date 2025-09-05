@@ -22,19 +22,26 @@ type PipelineConfig struct {
 
 // ExtractConfig contains extraction configuration
 type ExtractConfig struct {
-	ElasticsearchQuery string        `json:"elasticsearch_query" yaml:"elasticsearch_query"`
-	URLs               []string      `json:"urls" yaml:"urls"`
-	ClusterNames       []string      `json:"cluster_names" yaml:"cluster_names"`
-	AuthHeaders        []string      `json:"auth_headers,omitempty" yaml:"auth_headers,omitempty"`
-	AdditionalHeaders  [][]string    `json:"additional_headers,omitempty" yaml:"additional_headers,omitempty"`
-	JSONPaths          []string      `json:"json_paths" yaml:"json_paths"`
-	Interval           time.Duration `json:"interval" yaml:"interval"`
-	Timeout            time.Duration `json:"timeout" yaml:"timeout"`
-	MaxRetries         int           `json:"max_retries" yaml:"max_retries"`
-	StartTime          string        `json:"start_time,omitempty" yaml:"start_time,omitempty"`
-	EndTime            string        `json:"end_time,omitempty" yaml:"end_time,omitempty"`
-	InsecureTLS        bool          `json:"insecure_tls,omitempty" yaml:"insecure_tls,omitempty"`
-	Debug              DebugConfig   `json:"debug,omitempty" yaml:"debug,omitempty"`
+	ElasticsearchQuery string         `json:"elasticsearch_query" yaml:"elasticsearch_query"`
+	URLs               []string       `json:"urls" yaml:"urls"`
+	ClusterNames       []string       `json:"cluster_names" yaml:"cluster_names"`
+	AuthHeaders        []string       `json:"auth_headers,omitempty" yaml:"auth_headers,omitempty"`
+	AdditionalHeaders  [][]string     `json:"additional_headers,omitempty" yaml:"additional_headers,omitempty"`
+	JSONPath           string         `json:"json_path" yaml:"json_path"`                 // Single JSON path to extract
+	Filters            []FilterConfig `json:"filters,omitempty" yaml:"filters,omitempty"` // Multiple filters for flattened keys
+	Interval           time.Duration  `json:"interval" yaml:"interval"`
+	Timeout            time.Duration  `json:"timeout" yaml:"timeout"`
+	MaxRetries         int            `json:"max_retries" yaml:"max_retries"`
+	StartTime          string         `json:"start_time,omitempty" yaml:"start_time,omitempty"`
+	EndTime            string         `json:"end_time,omitempty" yaml:"end_time,omitempty"`
+	InsecureTLS        bool           `json:"insecure_tls,omitempty" yaml:"insecure_tls,omitempty"`
+	Debug              DebugConfig    `json:"debug,omitempty" yaml:"debug,omitempty"`
+}
+
+// FilterConfig defines filtering rules for flattened JSON keys
+type FilterConfig struct {
+	Type    string `json:"type" yaml:"type"`       // "include" or "exclude"
+	Pattern string `json:"pattern" yaml:"pattern"` // Pattern to match against flattened keys
 }
 
 // TransformConfig contains transformation configuration
@@ -43,11 +50,12 @@ type TransformConfig struct {
 	SubstituteZerosForNull bool                       `json:"substitute_zeros_for_null" yaml:"substitute_zeros_for_null"`
 	PreviousResultsSets    int                        `json:"previous_results_sets" yaml:"previous_results_sets"`
 	ConversionFunctions    []ConversionFunctionConfig `json:"conversion_functions" yaml:"conversion_functions"`
+	OutputFormat           string                     `json:"output_format,omitempty" yaml:"output_format,omitempty"` // csv, json (default: json)
 }
 
 // ConversionFunctionConfig defines field conversion functions
 type ConversionFunctionConfig struct {
-	Field    string `json:"field" yaml:"field"`
+	Field    string `json:"field" yaml:"field"`       // Flattened field path
 	Function string `json:"function" yaml:"function"` // convert_type, convert_to_kb, convert_to_mb, convert_to_gb
 	FromType string `json:"from_type,omitempty" yaml:"from_type,omitempty"`
 	ToType   string `json:"to_type,omitempty" yaml:"to_type,omitempty"`
@@ -57,12 +65,13 @@ type ConversionFunctionConfig struct {
 
 // LoadConfig contains load configuration
 type LoadConfig struct {
-	Streams []StreamConfig `json:"streams" yaml:"streams"`
+	Streams      []StreamConfig `json:"streams" yaml:"streams"`
+	LabelColumns []string       `json:"label_columns,omitempty" yaml:"label_columns,omitempty"` // Columns to use as labels
 }
 
 // StreamConfig defines a single load stream
 type StreamConfig struct {
-	Type        string                 `json:"type" yaml:"type"` // gem, otel, prometheus, debug
+	Type        string                 `json:"type" yaml:"type"` // gem, otel, prometheus, debug, csv
 	Config      map[string]interface{} `json:"config" yaml:"config"`
 	BasicAuth   *BasicAuthConfig       `json:"basic_auth,omitempty" yaml:"basic_auth,omitempty"`
 	InsecureTLS bool                   `json:"insecure_tls,omitempty" yaml:"insecure_tls,omitempty"`
@@ -110,4 +119,38 @@ type LoggingConfig struct {
 type DebugConfig struct {
 	Enabled bool   `json:"enabled" yaml:"enabled"`
 	Path    string `json:"path,omitempty" yaml:"path,omitempty"`
+}
+
+// DynamicLabelConfig defines how to create labels from CSV data
+type DynamicLabelConfig struct {
+	LabelName   string `json:"label_name" yaml:"label_name"`
+	CSVColumn   string `json:"csv_column,omitempty" yaml:"csv_column,omitempty"`
+	StaticValue string `json:"static_value,omitempty" yaml:"static_value,omitempty"`
+}
+
+// MetricColumnConfig defines which CSV columns to use as metrics
+type MetricColumnConfig struct {
+	Column     string `json:"column" yaml:"column"`
+	MetricName string `json:"metric_name" yaml:"metric_name"`
+}
+
+// PrometheusConfig defines Prometheus-specific configuration
+type PrometheusConfig struct {
+	RemoteWriteURL string               `json:"remote_write_url" yaml:"remote_write_url"`
+	DynamicLabels  []DynamicLabelConfig `json:"dynamic_labels,omitempty" yaml:"dynamic_labels,omitempty"`
+	MetricColumns  []MetricColumnConfig `json:"metric_columns,omitempty" yaml:"metric_columns,omitempty"`
+}
+
+// OTELConfig defines OpenTelemetry collector configuration
+type OTELConfig struct {
+	Endpoint           string               `json:"endpoint" yaml:"endpoint"`
+	DynamicLabels      []DynamicLabelConfig `json:"dynamic_labels,omitempty" yaml:"dynamic_labels,omitempty"`
+	ResourceAttributes []DynamicLabelConfig `json:"resource_attributes,omitempty" yaml:"resource_attributes,omitempty"`
+}
+
+// CSVConfig defines CSV output configuration
+type CSVConfig struct {
+	FilePath         string            `json:"file_path" yaml:"file_path"`
+	IncludeTimestamp bool              `json:"include_timestamp,omitempty" yaml:"include_timestamp,omitempty"`
+	HeaderMapping    map[string]string `json:"header_mapping,omitempty" yaml:"header_mapping,omitempty"`
 }

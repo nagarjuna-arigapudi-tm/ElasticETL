@@ -3,6 +3,7 @@ package load
 import (
 	"bytes"
 	"context"
+	"encoding/csv"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -141,6 +142,8 @@ func createStream(cfg config.StreamConfig) (Stream, error) {
 		return NewPrometheusStream(cfg.Config, cfg.Labels)
 	case "debug":
 		return NewDebugStream(cfg.Config)
+	case "csv":
+		return NewCSVStream(cfg.Config)
 	default:
 		return nil, fmt.Errorf("unsupported stream type: %s", cfg.Type)
 	}
@@ -418,16 +421,23 @@ func (o *OTELStream) GetType() string {
 
 // PrometheusStream handles loading to Prometheus
 type PrometheusStream struct {
-	endpoint   string
-	httpClient *http.Client
-	labels     map[string]string
+	endpoint      string
+	httpClient    *http.Client
+	labels        map[string]string
+	dynamicLabels []config.DynamicLabelConfig
+	metricColumns []config.MetricColumnConfig
 }
 
 // NewPrometheusStream creates a new Prometheus stream
 func NewPrometheusStream(config map[string]interface{}, labels map[string]string) (*PrometheusStream, error) {
-	endpoint, ok := config["endpoint"].(string)
-	if !ok {
-		return nil, fmt.Errorf("prometheus stream requires 'endpoint' configuration")
+	// Support both old endpoint format and new remote_write_url format
+	var endpoint string
+	if ep, ok := config["endpoint"].(string); ok {
+		endpoint = ep
+	} else if rwUrl, ok := config["remote_write_url"].(string); ok {
+		endpoint = rwUrl
+	} else {
+		return nil, fmt.Errorf("prometheus stream requires 'endpoint' or 'remote_write_url' configuration")
 	}
 
 	timeout := 30 * time.Second
@@ -437,13 +447,54 @@ func NewPrometheusStream(config map[string]interface{}, labels map[string]string
 		}
 	}
 
-	return &PrometheusStream{
+	stream := &PrometheusStream{
 		endpoint: endpoint,
 		labels:   labels,
 		httpClient: &http.Client{
 			Timeout: timeout,
 		},
-	}, nil
+	}
+
+	// Parse dynamic labels configuration
+	if dynamicLabelsRaw, ok := config["dynamic_labels"]; ok {
+		if dynamicLabelsSlice, ok := dynamicLabelsRaw.([]interface{}); ok {
+			for _, labelRaw := range dynamicLabelsSlice {
+				if labelMap, ok := labelRaw.(map[string]interface{}); ok {
+					var labelConfig config.DynamicLabelConfig
+					if labelName, ok := labelMap["label_name"].(string); ok {
+						labelConfig.LabelName = labelName
+					}
+					if csvColumn, ok := labelMap["csv_column"].(string); ok {
+						labelConfig.CSVColumn = csvColumn
+					}
+					if staticValue, ok := labelMap["static_value"].(string); ok {
+						labelConfig.StaticValue = staticValue
+					}
+					stream.dynamicLabels = append(stream.dynamicLabels, labelConfig)
+				}
+			}
+		}
+	}
+
+	// Parse metric columns configuration
+	if metricColumnsRaw, ok := config["metric_columns"]; ok {
+		if metricColumnsSlice, ok := metricColumnsRaw.([]interface{}); ok {
+			for _, metricRaw := range metricColumnsSlice {
+				if metricMap, ok := metricRaw.(map[string]interface{}); ok {
+					var metricConfig config.MetricColumnConfig
+					if column, ok := metricMap["column"].(string); ok {
+						metricConfig.Column = column
+					}
+					if metricName, ok := metricMap["metric_name"].(string); ok {
+						metricConfig.MetricName = metricName
+					}
+					stream.metricColumns = append(stream.metricColumns, metricConfig)
+				}
+			}
+		}
+	}
+
+	return stream, nil
 }
 
 // Load loads data to Prometheus
@@ -588,4 +639,81 @@ func (d *DebugStream) Close() error {
 // GetType returns the stream type
 func (d *DebugStream) GetType() string {
 	return "debug"
+}
+
+// CSVStream handles loading to CSV files
+type CSVStream struct {
+	path string
+}
+
+// NewCSVStream creates a new CSV stream
+func NewCSVStream(config map[string]interface{}) (*CSVStream, error) {
+	path, ok := config["path"].(string)
+	if !ok {
+		return nil, fmt.Errorf("csv stream requires 'path' configuration")
+	}
+
+	return &CSVStream{
+		path: path,
+	}, nil
+}
+
+// Load loads data to CSV file
+func (c *CSVStream) Load(ctx context.Context, results []*transform.TransformedResult) error {
+	if len(results) == 0 {
+		return nil
+	}
+
+	// Create CSV directory if it doesn't exist
+	csvDir := filepath.Dir(c.path)
+	if err := os.MkdirAll(csvDir, 0755); err != nil {
+		return fmt.Errorf("failed to create CSV directory: %w", err)
+	}
+
+	// Generate filename with timestamp
+	timestamp := time.Now().Format("20060102_150405")
+	filename := fmt.Sprintf("%s_%s.csv", filepath.Base(c.path), timestamp)
+	fullPath := filepath.Join(csvDir, filename)
+
+	// Create CSV file
+	file, err := os.Create(fullPath)
+	if err != nil {
+		return fmt.Errorf("failed to create CSV file: %w", err)
+	}
+	defer file.Close()
+
+	writer := csv.NewWriter(file)
+	defer writer.Flush()
+
+	// Write CSV data from transformed results
+	for _, result := range results {
+		if len(result.CSVHeaders) > 0 && len(result.CSVData) > 0 {
+			// Write headers (only for first result)
+			if result == results[0] {
+				if err := writer.Write(result.CSVHeaders); err != nil {
+					return fmt.Errorf("failed to write CSV headers: %w", err)
+				}
+			}
+
+			// Write data rows
+			for _, row := range result.CSVData {
+				if err := writer.Write(row); err != nil {
+					return fmt.Errorf("failed to write CSV row: %w", err)
+				}
+			}
+		}
+	}
+
+	fmt.Printf("CSV output written to: %s\n", fullPath)
+	return nil
+}
+
+// Close closes the CSV stream
+func (c *CSVStream) Close() error {
+	return nil
+}
+
+// GetType returns the stream type
+func (c *CSVStream) GetType() string {
+	return "csv"
 }

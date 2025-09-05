@@ -228,48 +228,161 @@ func (e *Extractor) extractFromEndpoint(ctx context.Context, index int) (*Result
 	return result, nil
 }
 
-// extractDataFromResponse extracts data from Elasticsearch response using configured JSON paths
+// extractDataFromResponse extracts data from Elasticsearch response using single JSON path and flattens it
 func (e *Extractor) extractDataFromResponse(responseBody []byte) (map[string]interface{}, error) {
-	if len(e.config.JSONPaths) == 0 {
-		// If no JSON paths specified, return the entire response
-		var data map[string]interface{}
+	if e.config.JSONPath == "" {
+		// If no JSON path specified, return the entire response flattened
+		var data interface{}
 		if err := json.Unmarshal(responseBody, &data); err != nil {
 			return nil, fmt.Errorf("failed to unmarshal response: %w", err)
 		}
-		return data, nil
+		return e.flattenJSON(data, ""), nil
 	}
 
-	extractedData := make(map[string]interface{})
 	responseStr := string(responseBody)
+	result := gjson.Get(responseStr, e.config.JSONPath)
 
-	for _, jsonPath := range e.config.JSONPaths {
-		result := gjson.Get(responseStr, jsonPath)
-		if result.Exists() {
-			// Use the last part of the JSON path as the key
-			key := utils.GetLastPathSegment(jsonPath)
+	if !result.Exists() {
+		return make(map[string]interface{}), nil
+	}
 
-			// Convert gjson.Result to appropriate Go type
-			switch result.Type {
-			case gjson.String:
-				extractedData[key] = result.String()
-			case gjson.Number:
-				extractedData[key] = result.Num
-			case gjson.True, gjson.False:
-				extractedData[key] = result.Bool()
-			case gjson.JSON:
-				var value interface{}
-				if err := json.Unmarshal([]byte(result.Raw), &value); err == nil {
-					extractedData[key] = value
-				} else {
-					extractedData[key] = result.Raw
+	// Parse the extracted JSON
+	var extractedData interface{}
+	if err := json.Unmarshal([]byte(result.Raw), &extractedData); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal extracted JSON: %w", err)
+	}
+
+	// Flatten the extracted data
+	flattened := e.flattenJSON(extractedData, "")
+
+	// Apply filters
+	filtered := e.applyFilters(flattened)
+
+	return filtered, nil
+}
+
+// flattenJSON recursively flattens a JSON structure
+func (e *Extractor) flattenJSON(data interface{}, prefix string) map[string]interface{} {
+	result := make(map[string]interface{})
+
+	switch v := data.(type) {
+	case map[string]interface{}:
+		// Handle single key-value pair with "value" key (case insensitive)
+		if len(v) == 1 {
+			for key, value := range v {
+				if strings.ToLower(key) == "value" {
+					// Assign the value to parent
+					if prefix != "" {
+						result[prefix] = value
+					} else {
+						result["value"] = value
+					}
+					return result
 				}
-			default:
-				extractedData[key] = result.Value()
+			}
+		}
+
+		// Regular object flattening
+		for key, value := range v {
+			newKey := key
+			if prefix != "" {
+				newKey = prefix + "." + key
+			}
+
+			flattened := e.flattenJSON(value, newKey)
+			for k, v := range flattened {
+				result[k] = v
+			}
+		}
+
+	case []interface{}:
+		// Handle arrays - create multiple rows
+		for i, item := range v {
+			indexKey := fmt.Sprintf("%s[%d]", prefix, i)
+			if prefix == "" {
+				indexKey = fmt.Sprintf("[%d]", i)
+			}
+
+			flattened := e.flattenJSON(item, indexKey)
+			for k, v := range flattened {
+				result[k] = v
+			}
+		}
+
+	default:
+		// Primitive value
+		if prefix != "" {
+			result[prefix] = v
+		} else {
+			result["value"] = v
+		}
+	}
+
+	return result
+}
+
+// applyFilters applies configured filters to flattened data
+func (e *Extractor) applyFilters(data map[string]interface{}) map[string]interface{} {
+	if len(e.config.Filters) == 0 {
+		return data
+	}
+
+	result := make(map[string]interface{})
+
+	// Check if we have include filters - if so, start with empty result
+	hasIncludeFilters := false
+	for _, filter := range e.config.Filters {
+		if filter.Type == "include" {
+			hasIncludeFilters = true
+			break
+		}
+	}
+
+	if !hasIncludeFilters {
+		// Copy all data first if no include filters
+		for k, v := range data {
+			result[k] = v
+		}
+	}
+
+	// Apply filters
+	for _, filter := range e.config.Filters {
+		if filter.Type == "exclude" {
+			// Remove keys that match the filter
+			for key := range result {
+				if e.matchesFilter(key, filter.Pattern) {
+					delete(result, key)
+				}
+			}
+		} else if filter.Type == "include" {
+			// Add keys that match the filter
+			for key, value := range data {
+				if e.matchesFilter(key, filter.Pattern) {
+					result[key] = value
+				}
 			}
 		}
 	}
 
-	return extractedData, nil
+	return result
+}
+
+// matchesFilter checks if a key matches a filter pattern
+func (e *Extractor) matchesFilter(key, pattern string) bool {
+	// Simple pattern matching - exact match or wildcard
+	if pattern == key {
+		return true
+	}
+
+	// Support for wildcard patterns
+	if strings.Contains(pattern, "*") {
+		// Convert pattern to regex-like matching
+		pattern = strings.ReplaceAll(pattern, "*", ".*")
+		matched, _ := filepath.Match(pattern, key)
+		return matched
+	}
+
+	return false
 }
 
 // UpdateConfig updates the extractor configuration

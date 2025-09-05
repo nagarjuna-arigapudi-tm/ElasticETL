@@ -1,0 +1,114 @@
+# Simple ElasticETL Configuration demonstrating Dynamic Labels
+# This shows how flattened CSV column headers become label names
+# and their row values become label values
+
+pipelines:
+  - name: "cluster-health-metrics"
+    enabled: true
+    interval: "30s"
+    
+    extract:
+      urls:
+        - "https://elasticsearch.example.com:9200"
+      cluster_names:
+        - "example-cluster"
+      query: |
+        {
+          "size": 0,
+          "aggs": {
+            "clusters": {
+              "terms": {
+                "field": "cluster_name.keyword",
+                "size": 10
+              },
+              "aggs": {
+                "status": {
+                  "terms": {
+                    "field": "status.keyword"
+                  }
+                },
+                "node_count": {
+                  "cardinality": {
+                    "field": "node_id.keyword"
+                  }
+                },
+                "avg_response_time": {
+                  "avg": {
+                    "field": "response_time_ms"
+                  }
+                }
+              }
+            }
+          }
+        }
+      json_path: "$.aggregations.clusters.buckets"
+      
+      # Simple filtering - only include what we need
+      filters:
+        - type: "include"
+          pattern: "key"                                    # cluster name
+        - type: "include" 
+          pattern: "status.buckets.0.key"                   # cluster status
+        - type: "include"
+          pattern: "node_count.value"                       # number of nodes
+        - type: "include"
+          pattern: "avg_response_time.value"                # avg response time
+
+    transform:
+      output_format: "csv"
+      stateless: true
+      substitute_nulls: true
+      
+      conversions:
+        - field_pattern: "avg_response_time.value"
+          function: "to_float"
+        - field_pattern: "node_count.value"
+          function: "to_int"
+
+    load:
+      streams:
+        - name: "prometheus-with-dynamic-labels"
+          type: "prometheus"
+          config:
+            remote_write_url: "http://prometheus:9090/api/v1/write"
+            
+            # Dynamic Labels: CSV column headers become label names
+            # Row values in those columns become label values
+            dynamic_labels:
+              # Label "cluster_name" gets value from CSV column "key"
+              - label_name: "cluster_name"
+                csv_column: "key"
+                
+              # Label "health_status" gets value from CSV column "status.buckets.0.key"  
+              - label_name: "health_status"
+                csv_column: "status.buckets.0.key"
+                
+              # Static labels (same for all metrics)
+              - label_name: "job"
+                static_value: "elasticsearch-health"
+                
+              - label_name: "environment"
+                static_value: "production"
+            
+            # Which CSV columns contain metric values
+            metric_columns:
+              - column: "node_count.value"
+                metric_name: "elasticsearch_cluster_nodes_total"
+              - column: "avg_response_time.value"
+                metric_name: "elasticsearch_cluster_response_time_ms"
+
+# Example of what the CSV data would look like:
+# key,status.buckets.0.key,node_count.value,avg_response_time.value
+# prod-cluster-1,green,5,12.5
+# prod-cluster-2,yellow,3,25.8
+# dev-cluster-1,green,2,8.2
+#
+# This would create Prometheus metrics with labels:
+# elasticsearch_cluster_nodes_total{cluster_name="prod-cluster-1",health_status="green",job="elasticsearch-health",environment="production"} 5
+# elasticsearch_cluster_response_time_ms{cluster_name="prod-cluster-1",health_status="green",job="elasticsearch-health",environment="production"} 12.5
+# elasticsearch_cluster_nodes_total{cluster_name="prod-cluster-2",health_status="yellow",job="elasticsearch-health",environment="production"} 3
+# etc...
+
+global:
+  log_level: "info"
+  max_concurrent_pipelines: 2

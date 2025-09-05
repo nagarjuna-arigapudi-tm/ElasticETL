@@ -1,0 +1,258 @@
+# ElasticETL Configuration with Dynamic Labels and Filtering
+# This config demonstrates how to use flattened keys as dynamic labels
+# where label values are selected from CSV data based on column headers
+
+pipelines:
+  - name: "elasticsearch-metrics-pipeline"
+    enabled: true
+    interval: "30s"
+    
+    extract:
+      endpoints:
+        - "https://elasticsearch.example.com:9200"
+      query: |
+        {
+          "size": 0,
+          "aggs": {
+            "clusters": {
+              "terms": {
+                "field": "cluster.name.keyword",
+                "size": 100
+              },
+              "aggs": {
+                "nodes": {
+                  "terms": {
+                    "field": "node.name.keyword",
+                    "size": 100
+                  },
+                  "aggs": {
+                    "metrics": {
+                      "terms": {
+                        "field": "metric.type.keyword",
+                        "size": 50
+                      },
+                      "aggs": {
+                        "avg_value": {
+                          "avg": {
+                            "field": "metric.value"
+                          }
+                        },
+                        "max_value": {
+                          "max": {
+                            "field": "metric.value"
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      json_path: "$.aggregations.clusters.buckets"
+      
+      # Filter configuration to exclude/include specific flattened keys
+      filters:
+        - type: "exclude"
+          pattern: "*.doc_count"  # Exclude all doc_count fields
+        - type: "exclude"
+          pattern: "*.key_as_string"  # Exclude timestamp string representations
+        - type: "include"
+          pattern: "key"  # Include cluster name key
+        - type: "include"
+          pattern: "nodes.buckets.*.key"  # Include node names
+        - type: "include"
+          pattern: "nodes.buckets.*.metrics.buckets.*.key"  # Include metric types
+        - type: "include"
+          pattern: "nodes.buckets.*.metrics.buckets.*.avg_value.value"  # Include avg values
+        - type: "include"
+          pattern: "nodes.buckets.*.metrics.buckets.*.max_value.value"  # Include max values
+
+    transform:
+      output_format: "csv"
+      stateless: true
+      substitute_nulls: true
+      history_sets: 3
+      
+      # Field transformations applied to specific flattened paths
+      conversions:
+        - field_pattern: "*.avg_value.value"
+          function: "to_float"
+        - field_pattern: "*.max_value.value"
+          function: "to_float"
+        - field_pattern: "*bytes*"
+          function: "bytes_to_mb"
+
+    load:
+      streams:
+        - name: "prometheus-metrics"
+          type: "prometheus"
+          config:
+            remote_write_url: "http://prometheus:9090/api/v1/write"
+            
+            # Dynamic Labels Configuration
+            # These labels will be created from CSV column headers and their values
+            dynamic_labels:
+              # Label name will be "cluster", value comes from CSV column "key"
+              - label_name: "cluster"
+                csv_column: "key"
+                
+              # Label name will be "node", value comes from flattened path containing node key
+              - label_name: "node" 
+                csv_column: "nodes.buckets.0.key"
+                
+              # Label name will be "metric_type", value from metric key column
+              - label_name: "metric_type"
+                csv_column: "nodes.buckets.0.metrics.buckets.0.key"
+                
+              # Static labels (always applied)
+              - label_name: "job"
+                static_value: "elasticsearch-etl"
+                
+              - label_name: "instance"
+                static_value: "etl-pipeline-1"
+            
+            # Metric columns - these CSV columns will be used as metric values
+            metric_columns:
+              - column: "nodes.buckets.0.metrics.buckets.0.avg_value.value"
+                metric_name: "elasticsearch_metric_avg"
+              - column: "nodes.buckets.0.metrics.buckets.0.max_value.value"
+                metric_name: "elasticsearch_metric_max"
+
+        - name: "otel-collector"
+          type: "otel"
+          config:
+            endpoint: "http://otel-collector:4317"
+            
+            # Dynamic Labels for OTEL
+            dynamic_labels:
+              - label_name: "service.name"
+                static_value: "elasticsearch-etl"
+              - label_name: "cluster.name"
+                csv_column: "key"
+              - label_name: "node.name"
+                csv_column: "nodes.buckets.0.key"
+              - label_name: "metric.type"
+                csv_column: "nodes.buckets.0.metrics.buckets.0.key"
+            
+            # Resource attributes from CSV data
+            resource_attributes:
+              - attribute: "elasticsearch.cluster"
+                csv_column: "key"
+              - attribute: "elasticsearch.node"
+                csv_column: "nodes.buckets.0.key"
+
+        - name: "csv-output"
+          type: "csv"
+          config:
+            file_path: "/data/elasticsearch-metrics.csv"
+            include_timestamp: true
+            
+            # Headers mapping for better readability
+            header_mapping:
+              "key": "cluster_name"
+              "nodes.buckets.0.key": "node_name"
+              "nodes.buckets.0.metrics.buckets.0.key": "metric_type"
+              "nodes.buckets.0.metrics.buckets.0.avg_value.value": "avg_value"
+              "nodes.buckets.0.metrics.buckets.0.max_value.value": "max_value"
+
+  # Second pipeline example with different dynamic labeling
+  - name: "system-metrics-pipeline"
+    enabled: true
+    interval: "60s"
+    
+    extract:
+      endpoints:
+        - "https://elasticsearch.example.com:9200"
+      query: |
+        {
+          "size": 0,
+          "aggs": {
+            "hosts": {
+              "terms": {
+                "field": "host.name.keyword",
+                "size": 100
+              },
+              "aggs": {
+                "cpu_usage": {
+                  "avg": {
+                    "field": "system.cpu.usage"
+                  }
+                },
+                "memory_usage": {
+                  "avg": {
+                    "field": "system.memory.usage"
+                  }
+                },
+                "disk_usage": {
+                  "avg": {
+                    "field": "system.disk.usage"
+                  }
+                }
+              }
+            }
+          }
+        }
+      json_path: "$.aggregations.hosts.buckets"
+      
+      filters:
+        - type: "exclude"
+          pattern: "*.doc_count"
+        - type: "include"
+          pattern: "key"  # hostname
+        - type: "include"
+          pattern: "cpu_usage.value"
+        - type: "include"
+          pattern: "memory_usage.value"
+        - type: "include"
+          pattern: "disk_usage.value"
+
+    transform:
+      output_format: "csv"
+      stateless: false
+      substitute_nulls: true
+      history_sets: 5
+      
+      conversions:
+        - field_pattern: "*_usage.value"
+          function: "multiply_100"  # Convert to percentage
+
+    load:
+      streams:
+        - name: "system-prometheus"
+          type: "prometheus"
+          config:
+            remote_write_url: "http://prometheus:9090/api/v1/write"
+            
+            dynamic_labels:
+              - label_name: "hostname"
+                csv_column: "key"
+              - label_name: "environment"
+                static_value: "production"
+              - label_name: "datacenter"
+                static_value: "dc1"
+            
+            metric_columns:
+              - column: "cpu_usage.value"
+                metric_name: "system_cpu_usage_percent"
+              - column: "memory_usage.value"
+                metric_name: "system_memory_usage_percent"
+              - column: "disk_usage.value"
+                metric_name: "system_disk_usage_percent"
+
+# Global settings
+global:
+  log_level: "info"
+  max_concurrent_pipelines: 5
+  resource_limits:
+    max_memory_mb: 512
+    max_cpu_percent: 50
+  
+  # Metrics for monitoring the ETL pipelines themselves
+  pipeline_metrics:
+    enabled: true
+    endpoint: "http://prometheus:9090/api/v1/write"
+    labels:
+      service: "elastic-etl"
+      version: "1.0.0"

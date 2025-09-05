@@ -3,18 +3,70 @@ package load
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/csv"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strings"
 	"sync"
 	"time"
 
 	"elasticetl/pkg/config"
 	"elasticetl/pkg/transform"
 )
+
+// substituteEnvVars replaces environment variables in the format ${VAR_NAME}
+func substituteEnvVars(input string) string {
+	re := regexp.MustCompile(`\$\{([^}]+)\}`)
+	return re.ReplaceAllStringFunc(input, func(match string) string {
+		// Extract variable name from ${VAR_NAME}
+		varName := strings.TrimPrefix(strings.TrimSuffix(match, "}"), "${")
+		if envValue := os.Getenv(varName); envValue != "" {
+			return envValue
+		}
+		return match // Return original if env var not found
+	})
+}
+
+// createBasicAuthHeader creates a basic auth header from username and password
+func createBasicAuthHeader(username, password string) string {
+	// Substitute environment variables
+	username = substituteEnvVars(username)
+	password = substituteEnvVars(password)
+
+	// Create basic auth header
+	auth := username + ":" + password
+	return "Basic " + base64.StdEncoding.EncodeToString([]byte(auth))
+}
+
+// parseBasicAuth parses basic auth configuration from stream config
+func parseBasicAuth(config map[string]interface{}) (string, error) {
+	basicAuthRaw, ok := config["basic_auth"]
+	if !ok {
+		return "", nil // No basic auth configured
+	}
+
+	basicAuthMap, ok := basicAuthRaw.(map[string]interface{})
+	if !ok {
+		return "", fmt.Errorf("basic_auth must be an object")
+	}
+
+	username, ok := basicAuthMap["username"].(string)
+	if !ok {
+		return "", fmt.Errorf("basic_auth.username is required")
+	}
+
+	password, ok := basicAuthMap["password"].(string)
+	if !ok {
+		return "", fmt.Errorf("basic_auth.password is required")
+	}
+
+	return createBasicAuthHeader(username, password), nil
+}
 
 // Loader handles data loading to various destinations
 type Loader struct {
@@ -426,6 +478,7 @@ type PrometheusStream struct {
 	labels        map[string]string
 	dynamicLabels []config.DynamicLabelConfig
 	metricColumns []config.MetricColumnConfig
+	basicAuth     string
 }
 
 // NewPrometheusStream creates a new Prometheus stream
@@ -494,6 +547,13 @@ func NewPrometheusStream(config map[string]interface{}, labels map[string]string
 		}
 	}
 
+	// Parse basic auth configuration
+	basicAuth, err := parseBasicAuth(config)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse basic auth: %w", err)
+	}
+	stream.basicAuth = basicAuth
+
 	return stream, nil
 }
 
@@ -509,6 +569,11 @@ func (p *PrometheusStream) Load(ctx context.Context, results []*transform.Transf
 	}
 
 	req.Header.Set("Content-Type", "text/plain")
+
+	// Add basic auth header if configured
+	if p.basicAuth != "" {
+		req.Header.Set("Authorization", p.basicAuth)
+	}
 
 	resp, err := p.httpClient.Do(req)
 	if err != nil {

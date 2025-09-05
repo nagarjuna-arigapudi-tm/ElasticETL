@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -18,6 +19,19 @@ import (
 
 	"github.com/tidwall/gjson"
 )
+
+// substituteEnvVars replaces environment variables in the format ${VAR_NAME}
+func substituteEnvVars(input string) string {
+	re := regexp.MustCompile(`\$\{([^}]+)\}`)
+	return re.ReplaceAllStringFunc(input, func(match string) string {
+		// Extract variable name from ${VAR_NAME}
+		varName := strings.TrimPrefix(strings.TrimSuffix(match, "}"), "${")
+		if envValue := os.Getenv(varName); envValue != "" {
+			return envValue
+		}
+		return match // Return original if env var not found
+	})
+}
 
 // Result represents extracted data
 type Result struct {
@@ -149,16 +163,20 @@ func (e *Extractor) extractFromEndpoint(ctx context.Context, index int) (*Result
 
 	req.Header.Set("Content-Type", "application/json")
 
-	// Add auth header if provided
+	// Add auth header if provided (with environment variable substitution)
 	if len(e.config.AuthHeaders) > index && e.config.AuthHeaders[index] != "" {
-		req.Header.Set("Authorization", e.config.AuthHeaders[index])
+		authHeader := substituteEnvVars(e.config.AuthHeaders[index])
+		req.Header.Set("Authorization", authHeader)
 	}
 
-	// Add additional headers if provided
+	// Add additional headers if provided (with environment variable substitution)
 	if len(e.config.AdditionalHeaders) > index && len(e.config.AdditionalHeaders[index]) > 0 {
 		for _, header := range e.config.AdditionalHeaders[index] {
 			// Each header should be in format "Key: Value"
 			if len(header) > 0 {
+				// Substitute environment variables in the header
+				header = substituteEnvVars(header)
+
 				// Split header string by first colon
 				parts := strings.SplitN(header, ":", 2)
 				if len(parts) == 2 {

@@ -1,0 +1,137 @@
+# ElasticETL Configuration demonstrating Basic Auth and Environment Variable Substitution
+# This shows how to use environment variables for authentication in both extract and load phases
+
+pipelines:
+  - name: "secure-elasticsearch-metrics"
+    enabled: true
+    interval: "60s"
+    
+    extract:
+      urls:
+        - "https://secure-elasticsearch.example.com:9200"
+      cluster_names:
+        - "production-cluster"
+      
+      # Environment variable substitution in auth headers
+      # Format: "ApiKey ${ENV_VAR_NAME}" where ENV_VAR_NAME contains the API key
+      auth_headers:
+        - "ApiKey ${ELASTICSEARCH_API_KEY}"
+      
+      # Additional headers with environment variable substitution
+      additional_headers:
+        - 
+          - "X-Custom-Header: ${CUSTOM_HEADER_VALUE}"
+          - "X-Client-ID: ${CLIENT_ID}"
+      
+      query: |
+        {
+          "size": 0,
+          "aggs": {
+            "clusters": {
+              "terms": {
+                "field": "cluster_name.keyword",
+                "size": 10
+              },
+              "aggs": {
+                "cpu_usage": {
+                  "avg": {
+                    "field": "system.cpu.usage"
+                  }
+                },
+                "memory_usage": {
+                  "avg": {
+                    "field": "system.memory.usage"
+                  }
+                }
+              }
+            }
+          }
+        }
+      json_path: "$.aggregations.clusters.buckets"
+      
+      filters:
+        - type: "include"
+          pattern: "key"
+        - type: "include"
+          pattern: "cpu_usage.value"
+        - type: "include"
+          pattern: "memory_usage.value"
+
+    transform:
+      output_format: "csv"
+      stateless: true
+      substitute_nulls: true
+      
+      conversions:
+        - field_pattern: "*_usage.value"
+          function: "multiply_100"
+
+    load:
+      streams:
+        # Prometheus with basic auth and environment variables
+        - name: "secure-prometheus"
+          type: "prometheus"
+          config:
+            remote_write_url: "https://prometheus.example.com/api/v1/write"
+            
+            # Basic authentication with environment variable substitution
+            basic_auth:
+              username: "${PROMETHEUS_USERNAME}"
+              password: "${PROMETHEUS_PASSWORD}"
+            
+            # Dynamic labels from CSV data
+            dynamic_labels:
+              - label_name: "cluster_name"
+                csv_column: "key"
+              - label_name: "environment"
+                static_value: "production"
+              - label_name: "datacenter"
+                static_value: "us-east-1"
+            
+            # Metric columns
+            metric_columns:
+              - column: "cpu_usage.value"
+                metric_name: "elasticsearch_cluster_cpu_percent"
+              - column: "memory_usage.value"
+                metric_name: "elasticsearch_cluster_memory_percent"
+
+        # OTEL collector with basic auth
+        - name: "secure-otel"
+          type: "otel"
+          config:
+            endpoint: "https://otel-collector.example.com:4317"
+            
+            # Basic authentication
+            basic_auth:
+              username: "${OTEL_USERNAME}"
+              password: "${OTEL_PASSWORD}"
+            
+            # Dynamic labels
+            dynamic_labels:
+              - label_name: "service.name"
+                static_value: "elasticsearch-monitoring"
+              - label_name: "cluster.name"
+                csv_column: "key"
+
+        # CSV output (no auth needed)
+        - name: "csv-backup"
+          type: "csv"
+          config:
+            file_path: "/data/elasticsearch-metrics-backup.csv"
+            include_timestamp: true
+
+# Example environment variables that would be set:
+# export ELASTICSEARCH_API_KEY="your-elasticsearch-api-key-here"
+# export CUSTOM_HEADER_VALUE="custom-value"
+# export CLIENT_ID="client-123"
+# export PROMETHEUS_USERNAME="prometheus-user"
+# export PROMETHEUS_PASSWORD="prometheus-secret"
+# export OTEL_USERNAME="otel-user"
+# export OTEL_PASSWORD="otel-secret"
+
+global:
+  log_level: "info"
+  max_concurrent_pipelines: 3
+  resource_limits:
+    max_memory_mb: 256
+    max_cpu_percent: 30

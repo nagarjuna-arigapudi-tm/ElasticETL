@@ -471,13 +471,26 @@ func (o *OTELStream) GetType() string {
 	return "otel"
 }
 
+// DynamicLabelConfig defines how to create labels from CSV data
+type DynamicLabelConfig struct {
+	LabelName   string `json:"label_name" yaml:"label_name"`
+	CSVColumn   string `json:"csv_column,omitempty" yaml:"csv_column,omitempty"`
+	StaticValue string `json:"static_value,omitempty" yaml:"static_value,omitempty"`
+}
+
+// MetricColumnConfig defines which CSV columns to use as metrics
+type MetricColumnConfig struct {
+	Column     string `json:"column" yaml:"column"`
+	MetricName string `json:"metric_name" yaml:"metric_name"`
+}
+
 // PrometheusStream handles loading to Prometheus
 type PrometheusStream struct {
 	endpoint      string
 	httpClient    *http.Client
 	labels        map[string]string
-	dynamicLabels []config.DynamicLabelConfig
-	metricColumns []config.MetricColumnConfig
+	dynamicLabels []DynamicLabelConfig
+	metricColumns []MetricColumnConfig
 	basicAuth     string
 }
 
@@ -513,7 +526,7 @@ func NewPrometheusStream(config map[string]interface{}, labels map[string]string
 		if dynamicLabelsSlice, ok := dynamicLabelsRaw.([]interface{}); ok {
 			for _, labelRaw := range dynamicLabelsSlice {
 				if labelMap, ok := labelRaw.(map[string]interface{}); ok {
-					var labelConfig config.DynamicLabelConfig
+					var labelConfig DynamicLabelConfig
 					if labelName, ok := labelMap["label_name"].(string); ok {
 						labelConfig.LabelName = labelName
 					}
@@ -534,7 +547,7 @@ func NewPrometheusStream(config map[string]interface{}, labels map[string]string
 		if metricColumnsSlice, ok := metricColumnsRaw.([]interface{}); ok {
 			for _, metricRaw := range metricColumnsSlice {
 				if metricMap, ok := metricRaw.(map[string]interface{}); ok {
-					var metricConfig config.MetricColumnConfig
+					var metricConfig MetricColumnConfig
 					if column, ok := metricMap["column"].(string); ok {
 						metricConfig.Column = column
 					}

@@ -1,0 +1,137 @@
+pipelines:
+  - name: "regex-filters-example"
+    enabled: true
+    interval: "30s"
+    
+    extract:
+      elasticsearch_query: |
+        {
+          "size": 0,
+          "aggs": {
+            "services": {
+              "terms": {
+                "field": "service.keyword",
+                "size": 10
+              },
+              "aggs": {
+                "avg_response_time": {
+                  "avg": {
+                    "field": "response_time"
+                  }
+                },
+                "max_response_time": {
+                  "max": {
+                    "field": "response_time"
+                  }
+                },
+                "min_response_time": {
+                  "min": {
+                    "field": "response_time"
+                  }
+                },
+                "cpu_metrics": {
+                  "stats": {
+                    "field": "cpu_usage"
+                  }
+                },
+                "memory_metrics": {
+                  "stats": {
+                    "field": "memory_usage"
+                  }
+                },
+                "disk_io_read": {
+                  "avg": {
+                    "field": "disk.io.read"
+                  }
+                },
+                "disk_io_write": {
+                  "avg": {
+                    "field": "disk.io.write"
+                  }
+                }
+              }
+            }
+          }
+        }
+      urls:
+        - "https://elasticsearch.example.com:9200/metrics-*/_search"
+      cluster_names:
+        - "production-cluster"
+      auth_headers:
+        - "ApiKey ${ELASTICSEARCH_API_KEY}"
+      json_path: "aggregations.services.buckets"
+      
+      # Regular expression filters for flattened keys
+      filters:
+        # Include only response time metrics (avg, max, min)
+        - type: "include"
+          pattern: ".*response_time.*"
+        
+        # Include CPU and memory stats
+        - type: "include"
+          pattern: ".*_(cpu|memory)_metrics\\.(avg|max|min|count|sum)"
+        
+        # Include disk I/O metrics
+        - type: "include"
+          pattern: "disk_io_(read|write)"
+        
+        # Include the service key
+        - type: "include"
+          pattern: "^key$"
+        
+        # Exclude any debug or internal fields
+        - type: "exclude"
+          pattern: ".*\\.(doc_count_error_upper_bound|sum_other_doc_count).*"
+        
+        # Exclude any fields containing "bucket" in the name
+        - type: "exclude"
+          pattern: ".*bucket.*"
+          
+      interval: "30s"
+      timeout: "10s"
+      max_retries: 3
+      
+    transform:
+      stateless: true
+      substitute_zeros_for_null: true
+      previous_results_sets: 0
+      output_format: "csv"
+      conversion_functions:
+        - field: "avg_response_time"
+          function: "convert_type"
+          from_type: "float"
+          to_type: "float"
+        - field: "cpu_metrics.avg"
+          function: "convert_type"
+          from_type: "float"
+          to_type: "float"
+          
+    load:
+      streams:
+        - type: "csv"
+          config:
+            path: "/tmp/elasticetl/regex-filtered-output"
+          labels:
+            pipeline: "regex-filters-example"
+            
+        - type: "debug"
+          config:
+            path: "/tmp/elasticetl/debug/regex-filters"
+          labels:
+            pipeline: "regex-filters-example"
+
+global:
+  resource_limits:
+    max_memory_mb: 512
+    max_cpu_percent: 50
+    max_goroutines: 100
+    max_connections: 10
+  metrics:
+    enabled: true
+    port: 8080
+    path: "/metrics"
+    interval: "30s"
+  logging:
+    level: "info"
+    format: "json"
+    output: "stdout"

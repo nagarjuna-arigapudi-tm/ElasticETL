@@ -3,8 +3,10 @@ package transform
 import (
 	"fmt"
 	"reflect"
+	"regexp"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 
 	"elasticetl/pkg/config"
@@ -295,156 +297,319 @@ func (t *Transformer) GetPreviousResults() [][]*TransformedResult {
 	return result
 }
 
-// convertToCSV converts flattened data to CSV format
+// convertToCSV converts flattened data to CSV format using depth-based unique key analysis
 func (t *Transformer) convertToCSV(results []*TransformedResult) error {
 	if len(results) == 0 {
 		return nil
 	}
 
-	// Collect all unique column names from all results
-	columnSet := make(map[string]bool)
-	for _, result := range results {
-		for key := range result.TransformedData {
-			columnSet[key] = true
-		}
-	}
-
-	// Convert to sorted slice for consistent column order
-	var columns []string
-	for col := range columnSet {
-		columns = append(columns, col)
-	}
-	sort.Strings(columns)
+	// Analyze all flattened keys to determine unique column names
+	uniqueKeys := t.analyzeUniqueKeys(results)
 
 	// Set headers for all results
 	for _, result := range results {
-		result.CSVHeaders = columns
+		result.CSVHeaders = uniqueKeys
 	}
 
 	// Convert each result to CSV rows
 	for _, result := range results {
-		rows := t.flattenToCSVRows(result.TransformedData, columns)
+		rows := t.generateCSVRows(result.TransformedData, uniqueKeys)
 		result.CSVData = rows
 	}
 
 	return nil
 }
 
-// flattenToCSVRows converts flattened data to CSV rows with proper nested array handling
-func (t *Transformer) flattenToCSVRows(data map[string]interface{}, columns []string) [][]string {
-	// Find all nested array structures and calculate total rows needed
-	nestedArrays := t.findNestedArrays(data)
+// analyzeUniqueKeys analyzes flattened JSON keys by depth levels to determine unique column names
+func (t *Transformer) analyzeUniqueKeys(results []*TransformedResult) []string {
+	// Collect all flattened keys from all results
+	allKeys := make(map[string]bool)
+	for _, result := range results {
+		for key := range result.TransformedData {
+			allKeys[key] = true
+		}
+	}
 
-	if len(nestedArrays) == 0 {
-		// No nested arrays, create single row
-		row := make([]string, len(columns))
-		for colIdx, column := range columns {
-			if value, exists := data[column]; exists {
+	// Group keys by depth level
+	keysByDepth := make(map[int][]string)
+	maxDepth := 0
+
+	for key := range allKeys {
+		depth := t.calculateKeyDepth(key)
+		keysByDepth[depth] = append(keysByDepth[depth], key)
+		if depth > maxDepth {
+			maxDepth = depth
+		}
+	}
+
+	// Process each depth level to extract unique keys
+	uniqueKeySet := make(map[string]bool)
+
+	for depth := 1; depth <= maxDepth; depth++ {
+		keys := keysByDepth[depth]
+		for _, key := range keys {
+			uniqueKey := t.removeArrayIndices(key)
+			uniqueKeySet[uniqueKey] = true
+		}
+	}
+
+	// Convert to sorted slice for consistent column order
+	var uniqueKeys []string
+	for key := range uniqueKeySet {
+		uniqueKeys = append(uniqueKeys, key)
+	}
+	sort.Strings(uniqueKeys)
+
+	return uniqueKeys
+}
+
+// calculateKeyDepth calculates the depth level of a flattened key
+func (t *Transformer) calculateKeyDepth(key string) int {
+	// Count the number of dots and array indices to determine depth
+	depth := 1 // Start with 1 for the base level
+
+	// Count dots (each dot represents a level)
+	for _, char := range key {
+		if char == '.' {
+			depth++
+		}
+	}
+
+	return depth
+}
+
+// removeArrayIndices removes array indices from a flattened key to create unique column name
+func (t *Transformer) removeArrayIndices(key string) string {
+	// Remove array indices like [0], [1], etc.
+	re := regexp.MustCompile(`\[\d+\]`)
+	return re.ReplaceAllString(key, "")
+}
+
+// generateCSVRows generates CSV rows from flattened data based on unique keys
+func (t *Transformer) generateCSVRows(data map[string]interface{}, uniqueKeys []string) [][]string {
+	// Find all array paths and their combinations
+	arrayPaths := t.findArrayPaths(data)
+
+	if len(arrayPaths) == 0 {
+		// No arrays, create single row
+		row := make([]string, len(uniqueKeys))
+		for colIdx, uniqueKey := range uniqueKeys {
+			// Find matching key in data
+			if value := t.findValueForUniqueKey(data, uniqueKey); value != nil {
 				row[colIdx] = t.formatValue(value)
 			}
 		}
 		return [][]string{row}
 	}
 
-	// Calculate total rows needed by finding the maximum array length
-	totalRows := t.calculateTotalRows(data, nestedArrays)
-	rows := make([][]string, totalRows)
+	// Generate all possible combinations of array indices
+	combinations := t.generateArrayCombinations(arrayPaths)
 
-	// Generate rows by expanding nested arrays
-	rowIndex := 0
-	t.expandNestedArrays(data, nestedArrays, columns, &rows, &rowIndex, make(map[string]interface{}), 0)
+	// Create rows for each combination
+	var rows [][]string
+	for _, combination := range combinations {
+		row := make([]string, len(uniqueKeys))
+		for colIdx, uniqueKey := range uniqueKeys {
+			value := t.findValueForCombination(data, uniqueKey, combination)
+			row[colIdx] = t.formatValue(value)
+		}
+		rows = append(rows, row)
+	}
 
-	return rows[:rowIndex] // Return only the rows that were actually filled
+	return rows
 }
 
-// findNestedArrays identifies nested array structures in flattened data
-func (t *Transformer) findNestedArrays(data map[string]interface{}) map[string][]interface{} {
-	nestedArrays := make(map[string][]interface{})
+// findArrayPaths identifies all array paths in the flattened data
+func (t *Transformer) findArrayPaths(data map[string]interface{}) map[string][]int {
+	arrayPaths := make(map[string][]int)
 
+	for key := range data {
+		// Extract array path and index
+		if path, index := t.extractArrayPathAndIndex(key); path != "" {
+			if _, exists := arrayPaths[path]; !exists {
+				arrayPaths[path] = []int{}
+			}
+			// Add index if not already present
+			found := false
+			for _, existingIndex := range arrayPaths[path] {
+				if existingIndex == index {
+					found = true
+					break
+				}
+			}
+			if !found {
+				arrayPaths[path] = append(arrayPaths[path], index)
+			}
+		}
+	}
+
+	// Sort indices for each path
+	for path := range arrayPaths {
+		sort.Ints(arrayPaths[path])
+	}
+
+	return arrayPaths
+}
+
+// extractArrayPathAndIndex extracts the array path and index from a flattened key
+func (t *Transformer) extractArrayPathAndIndex(key string) (string, int) {
+	// Find array indices in the key
+	re := regexp.MustCompile(`\[(\d+)\]`)
+	matches := re.FindAllStringSubmatch(key, -1)
+
+	if len(matches) == 0 {
+		return "", -1
+	}
+
+	// Get the deepest array path (last array index in the key)
+	lastMatch := matches[len(matches)-1]
+	index := 0
+	if len(lastMatch) > 1 {
+		if parsed, err := strconv.Atoi(lastMatch[1]); err == nil {
+			index = parsed
+		}
+	}
+
+	// Extract the path up to the last array index
+	lastIndexPos := strings.LastIndex(key, lastMatch[0])
+	if lastIndexPos == -1 {
+		return "", -1
+	}
+
+	path := key[:lastIndexPos]
+	return path, index
+}
+
+// generateArrayCombinations generates all possible combinations of array indices
+func (t *Transformer) generateArrayCombinations(arrayPaths map[string][]int) []map[string]int {
+	if len(arrayPaths) == 0 {
+		return []map[string]int{{}}
+	}
+
+	// Get sorted paths for consistent processing
+	var paths []string
+	for path := range arrayPaths {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+
+	// Generate combinations recursively
+	return t.generateCombinationsRecursive(paths, arrayPaths, 0, make(map[string]int))
+}
+
+// generateCombinationsRecursive recursively generates array index combinations
+func (t *Transformer) generateCombinationsRecursive(paths []string, arrayPaths map[string][]int, pathIndex int, currentCombination map[string]int) []map[string]int {
+	if pathIndex >= len(paths) {
+		// Base case: copy current combination
+		combination := make(map[string]int)
+		for k, v := range currentCombination {
+			combination[k] = v
+		}
+		return []map[string]int{combination}
+	}
+
+	path := paths[pathIndex]
+	indices := arrayPaths[path]
+
+	var allCombinations []map[string]int
+	for _, index := range indices {
+		currentCombination[path] = index
+		combinations := t.generateCombinationsRecursive(paths, arrayPaths, pathIndex+1, currentCombination)
+		allCombinations = append(allCombinations, combinations...)
+	}
+
+	return allCombinations
+}
+
+// findValueForUniqueKey finds the value for a unique key in the flattened data
+func (t *Transformer) findValueForUniqueKey(data map[string]interface{}, uniqueKey string) interface{} {
+	// Try exact match first
+	if value, exists := data[uniqueKey]; exists {
+		return value
+	}
+
+	// Look for keys that match the unique key pattern (with array indices)
 	for key, value := range data {
-		if arr, ok := value.([]interface{}); ok {
-			// Check if this is a nested array (contains objects)
-			if len(arr) > 0 {
-				if _, isObject := arr[0].(map[string]interface{}); isObject {
-					nestedArrays[key] = arr
+		if t.removeArrayIndices(key) == uniqueKey {
+			return value
+		}
+	}
+
+	return nil
+}
+
+// findValueForCombination finds the value for a unique key with specific array index combination
+func (t *Transformer) findValueForCombination(data map[string]interface{}, uniqueKey string, combination map[string]int) interface{} {
+	// Try exact match first (for non-array keys)
+	if value, exists := data[uniqueKey]; exists {
+		return value
+	}
+
+	// Build the specific key with array indices from combination
+	specificKey := t.buildSpecificKey(uniqueKey, combination)
+	if value, exists := data[specificKey]; exists {
+		return value
+	}
+
+	// Look for any matching key with the right pattern
+	for key, value := range data {
+		if t.matchesKeyPattern(key, uniqueKey, combination) {
+			return value
+		}
+	}
+
+	return nil
+}
+
+// buildSpecificKey builds a specific key with array indices from combination
+func (t *Transformer) buildSpecificKey(uniqueKey string, combination map[string]int) string {
+	result := uniqueKey
+
+	// Sort paths by length (longest first) to handle nested arrays correctly
+	var paths []string
+	for path := range combination {
+		paths = append(paths, path)
+	}
+	sort.Slice(paths, func(i, j int) bool {
+		return len(paths[i]) > len(paths[j])
+	})
+
+	// Replace each array path with its specific index
+	for _, path := range paths {
+		index := combination[path]
+		if strings.HasPrefix(result, path) {
+			result = strings.Replace(result, path, fmt.Sprintf("%s[%d]", path, index), 1)
+		}
+	}
+
+	return result
+}
+
+// matchesKeyPattern checks if a key matches the unique key pattern with given combination
+func (t *Transformer) matchesKeyPattern(key, uniqueKey string, combination map[string]int) bool {
+	// Remove array indices from the key and compare with unique key
+	keyWithoutIndices := t.removeArrayIndices(key)
+	if keyWithoutIndices != uniqueKey {
+		return false
+	}
+
+	// Check if the key's array indices match the combination
+	for path, expectedIndex := range combination {
+		if strings.Contains(key, path) {
+			// Extract the actual index from the key for this path
+			pattern := regexp.MustCompile(regexp.QuoteMeta(path) + `\[(\d+)\]`)
+			matches := pattern.FindStringSubmatch(key)
+			if len(matches) > 1 {
+				if actualIndex, err := strconv.Atoi(matches[1]); err == nil {
+					if actualIndex != expectedIndex {
+						return false
+					}
 				}
 			}
 		}
 	}
 
-	return nestedArrays
-}
-
-// calculateTotalRows calculates the total number of CSV rows needed
-func (t *Transformer) calculateTotalRows(data map[string]interface{}, nestedArrays map[string][]interface{}) int {
-	if len(nestedArrays) == 0 {
-		return 1
-	}
-
-	// For nested structures, multiply the lengths of all nested arrays
-	totalRows := 1
-	for _, arr := range nestedArrays {
-		if len(arr) > 0 {
-			totalRows *= len(arr)
-		}
-	}
-
-	return totalRows
-}
-
-// expandNestedArrays recursively expands nested arrays into CSV rows
-func (t *Transformer) expandNestedArrays(data map[string]interface{}, nestedArrays map[string][]interface{},
-	columns []string, rows *[][]string, rowIndex *int, currentRow map[string]interface{}, arrayIndex int) {
-
-	// Get array keys in sorted order for consistent processing
-	var arrayKeys []string
-	for key := range nestedArrays {
-		arrayKeys = append(arrayKeys, key)
-	}
-	sort.Strings(arrayKeys)
-
-	if arrayIndex >= len(arrayKeys) {
-		// Base case: create a CSV row with current values
-		if *rowIndex < len(*rows) {
-			(*rows)[*rowIndex] = make([]string, len(columns))
-
-			// Fill the row with values
-			for colIdx, column := range columns {
-				if value, exists := currentRow[column]; exists {
-					(*rows)[*rowIndex][colIdx] = t.formatValue(value)
-				} else if value, exists := data[column]; exists {
-					// Use original data if not in current row (non-array values)
-					(*rows)[*rowIndex][colIdx] = t.formatValue(value)
-				}
-			}
-			*rowIndex++
-		}
-		return
-	}
-
-	// Process current array level
-	currentArrayKey := arrayKeys[arrayIndex]
-	currentArray := nestedArrays[currentArrayKey]
-
-	for _, arrayItem := range currentArray {
-		// Create a new row context with current array item values
-		newRow := make(map[string]interface{})
-		for k, v := range currentRow {
-			newRow[k] = v
-		}
-
-		// Add values from current array item
-		if itemMap, ok := arrayItem.(map[string]interface{}); ok {
-			for key, value := range itemMap {
-				// Create flattened key name (e.g., "hosts.key", "hosts.cpu_usage")
-				flattenedKey := currentArrayKey + "." + key
-				newRow[flattenedKey] = value
-			}
-		}
-
-		// Recursively process next array level
-		t.expandNestedArrays(data, nestedArrays, columns, rows, rowIndex, newRow, arrayIndex+1)
-	}
+	return true
 }
 
 // getArraySize returns the size of an array value, or 1 for non-arrays

@@ -8,55 +8,79 @@ When Elasticsearch aggregation results contain nested arrays (like buckets withi
 
 ## How It Works
 
-### Input Data Structure
+### Input Data Structure (Flattened JSON)
 
 Consider this flattened Elasticsearch aggregation result:
 
-```json
-[
-  {
-    "key": "api-service",
-    "doc_count": 1000,
-    "avg_response_time": 125.5,
-    "hosts": [
-      {
-        "key": "host-1",
-        "cpu_usage": 75.2
-      },
-      {
-        "key": "host-2", 
-        "cpu_usage": 68.9
-      }
-    ]
-  },
-  {
-    "key": "web-service",
-    "doc_count": 500,
-    "avg_response_time": 89.3,
-    "hosts": [
-      {
-        "key": "host-3",
-        "cpu_usage": 82.1
-      },
-      {
-        "key": "host-4",
-        "cpu_usage": 72.3
-      }
-    ]
-  }
-]
 ```
+[0].key = "api-service"
+[0].doc_count = 1000
+[0].avg_response_time = 125.5
+[0].hosts.buckets[0].key = "host-1"
+[0].hosts.buckets[0].cpu_usage.buckets[0].system = 15.7
+[0].hosts.buckets[0].cpu_usage.buckets[0].user = 55.2
+[0].hosts.buckets[0].cpu_usage.buckets[0].idle = 57.3
+[0].hosts.buckets[0].cpu_usage.buckets[1].system = 25.7
+[0].hosts.buckets[0].cpu_usage.buckets[1].user = 53.1
+[0].hosts.buckets[0].cpu_usage.buckets[1].idle = 25.2
+[0].hosts.buckets[1].key = "host-2"
+[0].hosts.buckets[1].cpu_usage.buckets[0].system = 35.7
+[0].hosts.buckets[1].cpu_usage.buckets[0].user = 52.2
+[0].hosts.buckets[1].cpu_usage.buckets[0].idle = 34.2
+[0].hosts.buckets[1].cpu_usage.buckets[1].system = 15.7
+[0].hosts.buckets[1].cpu_usage.buckets[1].user = 23.1
+[0].hosts.buckets[1].cpu_usage.buckets[1].idle = 60.2
+[1].key = "web-service"
+[1].doc_count = 500
+[1].avg_response_time = 89.3
+[1].hosts.buckets[0].key = "host-3"
+[1].hosts.buckets[0].cpu_usage.buckets[0].system = 6.7
+[1].hosts.buckets[0].cpu_usage.buckets[0].user = 9.3
+[1].hosts.buckets[0].cpu_usage.buckets[0].idle = 74.6
+[1].hosts.buckets[0].cpu_usage.buckets[1].system = 27.0
+[1].hosts.buckets[0].cpu_usage.buckets[1].user = 13.2
+[1].hosts.buckets[0].cpu_usage.buckets[1].idle = 63.5
+[1].hosts.buckets[1].key = "host-4"
+[1].hosts.buckets[1].cpu_usage.buckets[0].system = 20.7
+[1].hosts.buckets[1].cpu_usage.buckets[0].user = 12.3
+[1].hosts.buckets[1].cpu_usage.buckets[0].idle = 54.5
+[1].hosts.buckets[1].cpu_usage.buckets[1].system = 27.7
+[1].hosts.buckets[1].cpu_usage.buckets[1].user = 33.4
+[1].hosts.buckets[1].cpu_usage.buckets[1].idle = 40.9
+```
+
+### Depth-Based Unique Key Analysis
+
+The transformer analyzes flattened keys by depth levels:
+
+**Level 2 (after removing array indices):**
+- `key`, `doc_count`, `avg_response_time`
+
+**Level 4:**
+- `hosts.buckets.key`
+
+**Level 6:**
+- `hosts.buckets.cpu_usage.buckets.system`
+- `hosts.buckets.cpu_usage.buckets.user`
+- `hosts.buckets.cpu_usage.buckets.idle`
+
+**Final Unique Keys:**
+`key,doc_count,avg_response_time,hosts.buckets.key,hosts.buckets.cpu_usage.buckets.system,hosts.buckets.cpu_usage.buckets.user,hosts.buckets.cpu_usage.buckets.idle`
 
 ### Output CSV Structure
 
-The transformer automatically detects nested arrays and expands them into multiple rows:
+The transformer creates multiple rows by expanding all array combinations:
 
 ```csv
-key,doc_count,avg_response_time,hosts.key,hosts.cpu_usage
-"api-service",1000,125.5,"host-1",75.2
-"api-service",1000,125.5,"host-2",68.9
-"web-service",500,89.3,"host-3",82.1
-"web-service",500,89.3,"host-4",72.3
+key,doc_count,avg_response_time,hosts.buckets.key,hosts.buckets.cpu_usage.buckets.system,hosts.buckets.cpu_usage.buckets.user,hosts.buckets.cpu_usage.buckets.idle
+"api-service",1000,125.5,"host-1",15.7,55.2,57.3
+"api-service",1000,125.5,"host-1",25.7,53.1,25.2
+"api-service",1000,125.5,"host-2",35.7,52.2,34.2
+"api-service",1000,125.5,"host-2",15.7,23.1,60.2
+"web-service",500,89.3,"host-3",6.7,9.3,74.6
+"web-service",500,89.3,"host-3",27.0,13.2,63.5
+"web-service",500,89.3,"host-4",20.7,12.3,54.5
+"web-service",500,89.3,"host-4",27.7,33.4,40.9
 ```
 
 ## Key Features

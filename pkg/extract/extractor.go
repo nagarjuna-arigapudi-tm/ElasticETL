@@ -385,22 +385,17 @@ func (e *Extractor) applyFilters(data map[string]interface{}) map[string]interfa
 	return result
 }
 
-// matchesFilter checks if a key matches a filter pattern
+// matchesFilter checks if a key matches a filter pattern using regular expressions
 func (e *Extractor) matchesFilter(key, pattern string) bool {
-	// Simple pattern matching - exact match or wildcard
-	if pattern == key {
-		return true
+	// Compile the regular expression pattern
+	regex, err := regexp.Compile(pattern)
+	if err != nil {
+		// If pattern is invalid regex, fall back to exact string match
+		return pattern == key
 	}
 
-	// Support for wildcard patterns
-	if strings.Contains(pattern, "*") {
-		// Convert pattern to regex-like matching
-		pattern = strings.ReplaceAll(pattern, "*", ".*")
-		matched, _ := filepath.Match(pattern, key)
-		return matched
-	}
-
-	return false
+	// Use regex to match the key
+	return regex.MatchString(key)
 }
 
 // UpdateConfig updates the extractor configuration

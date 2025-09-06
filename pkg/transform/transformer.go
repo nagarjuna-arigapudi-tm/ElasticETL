@@ -330,46 +330,121 @@ func (t *Transformer) convertToCSV(results []*TransformedResult) error {
 	return nil
 }
 
-// flattenToCSVRows converts flattened data to CSV rows
+// flattenToCSVRows converts flattened data to CSV rows with proper nested array handling
 func (t *Transformer) flattenToCSVRows(data map[string]interface{}, columns []string) [][]string {
-	// Handle nested arrays that create multiple rows
-	maxRows := t.calculateMaxRows(data, columns)
+	// Find all nested array structures and calculate total rows needed
+	nestedArrays := t.findNestedArrays(data)
 
-	if maxRows == 0 {
-		maxRows = 1 // At least one row
-	}
-
-	rows := make([][]string, maxRows)
-	for i := range rows {
-		rows[i] = make([]string, len(columns))
-	}
-
-	// Fill in the data
-	for colIdx, column := range columns {
-		values := t.extractColumnValues(data, column, maxRows)
-		for rowIdx, value := range values {
-			if rowIdx < maxRows {
-				rows[rowIdx][colIdx] = t.formatValue(value)
+	if len(nestedArrays) == 0 {
+		// No nested arrays, create single row
+		row := make([]string, len(columns))
+		for colIdx, column := range columns {
+			if value, exists := data[column]; exists {
+				row[colIdx] = t.formatValue(value)
 			}
 		}
+		return [][]string{row}
 	}
 
-	return rows
+	// Calculate total rows needed by finding the maximum array length
+	totalRows := t.calculateTotalRows(data, nestedArrays)
+	rows := make([][]string, totalRows)
+
+	// Generate rows by expanding nested arrays
+	rowIndex := 0
+	t.expandNestedArrays(data, nestedArrays, columns, &rows, &rowIndex, make(map[string]interface{}), 0)
+
+	return rows[:rowIndex] // Return only the rows that were actually filled
 }
 
-// calculateMaxRows determines how many CSV rows are needed based on array data
-func (t *Transformer) calculateMaxRows(data map[string]interface{}, columns []string) int {
-	maxRows := 1
+// findNestedArrays identifies nested array structures in flattened data
+func (t *Transformer) findNestedArrays(data map[string]interface{}) map[string][]interface{} {
+	nestedArrays := make(map[string][]interface{})
 
-	for _, column := range columns {
-		if value, exists := data[column]; exists {
-			if arraySize := t.getArraySize(value); arraySize > maxRows {
-				maxRows = arraySize
+	for key, value := range data {
+		if arr, ok := value.([]interface{}); ok {
+			// Check if this is a nested array (contains objects)
+			if len(arr) > 0 {
+				if _, isObject := arr[0].(map[string]interface{}); isObject {
+					nestedArrays[key] = arr
+				}
 			}
 		}
 	}
 
-	return maxRows
+	return nestedArrays
+}
+
+// calculateTotalRows calculates the total number of CSV rows needed
+func (t *Transformer) calculateTotalRows(data map[string]interface{}, nestedArrays map[string][]interface{}) int {
+	if len(nestedArrays) == 0 {
+		return 1
+	}
+
+	// For nested structures, multiply the lengths of all nested arrays
+	totalRows := 1
+	for _, arr := range nestedArrays {
+		if len(arr) > 0 {
+			totalRows *= len(arr)
+		}
+	}
+
+	return totalRows
+}
+
+// expandNestedArrays recursively expands nested arrays into CSV rows
+func (t *Transformer) expandNestedArrays(data map[string]interface{}, nestedArrays map[string][]interface{},
+	columns []string, rows *[][]string, rowIndex *int, currentRow map[string]interface{}, arrayIndex int) {
+
+	// Get array keys in sorted order for consistent processing
+	var arrayKeys []string
+	for key := range nestedArrays {
+		arrayKeys = append(arrayKeys, key)
+	}
+	sort.Strings(arrayKeys)
+
+	if arrayIndex >= len(arrayKeys) {
+		// Base case: create a CSV row with current values
+		if *rowIndex < len(*rows) {
+			(*rows)[*rowIndex] = make([]string, len(columns))
+
+			// Fill the row with values
+			for colIdx, column := range columns {
+				if value, exists := currentRow[column]; exists {
+					(*rows)[*rowIndex][colIdx] = t.formatValue(value)
+				} else if value, exists := data[column]; exists {
+					// Use original data if not in current row (non-array values)
+					(*rows)[*rowIndex][colIdx] = t.formatValue(value)
+				}
+			}
+			*rowIndex++
+		}
+		return
+	}
+
+	// Process current array level
+	currentArrayKey := arrayKeys[arrayIndex]
+	currentArray := nestedArrays[currentArrayKey]
+
+	for _, arrayItem := range currentArray {
+		// Create a new row context with current array item values
+		newRow := make(map[string]interface{})
+		for k, v := range currentRow {
+			newRow[k] = v
+		}
+
+		// Add values from current array item
+		if itemMap, ok := arrayItem.(map[string]interface{}); ok {
+			for key, value := range itemMap {
+				// Create flattened key name (e.g., "hosts.key", "hosts.cpu_usage")
+				flattenedKey := currentArrayKey + "." + key
+				newRow[flattenedKey] = value
+			}
+		}
+
+		// Recursively process next array level
+		t.expandNestedArrays(data, nestedArrays, columns, rows, rowIndex, newRow, arrayIndex+1)
+	}
 }
 
 // getArraySize returns the size of an array value, or 1 for non-arrays

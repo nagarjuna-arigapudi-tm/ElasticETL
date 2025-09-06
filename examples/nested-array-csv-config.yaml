@@ -1,0 +1,98 @@
+pipelines:
+  - name: "nested-array-csv-example"
+    enabled: true
+    interval: "30s"
+    
+    extract:
+      elasticsearch_query: |
+        {
+          "size": 0,
+          "aggs": {
+            "services": {
+              "terms": {
+                "field": "service.keyword",
+                "size": 10
+              },
+              "aggs": {
+                "doc_count": {
+                  "value_count": {
+                    "field": "_id"
+                  }
+                },
+                "avg_response_time": {
+                  "avg": {
+                    "field": "response_time"
+                  }
+                },
+                "hosts": {
+                  "terms": {
+                    "field": "host.keyword",
+                    "size": 5
+                  },
+                  "aggs": {
+                    "cpu_usage": {
+                      "avg": {
+                        "field": "cpu_usage"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      urls:
+        - "https://elasticsearch.example.com:9200/logs-*/_search"
+      cluster_names:
+        - "production-cluster"
+      auth_headers:
+        - "ApiKey ${ELASTICSEARCH_API_KEY}"
+      json_path: "aggregations.services.buckets"
+      interval: "30s"
+      timeout: "10s"
+      max_retries: 3
+      
+    transform:
+      stateless: true
+      substitute_zeros_for_null: true
+      previous_results_sets: 0
+      output_format: "csv"  # Enable CSV output format
+      conversion_functions:
+        - field: "avg_response_time.value"
+          function: "convert_type"
+          from_type: "float"
+          to_type: "float"
+        - field: "doc_count.value"
+          function: "convert_type"
+          from_type: "float"
+          to_type: "int"
+          
+    load:
+      streams:
+        - type: "csv"
+          config:
+            path: "/tmp/elasticetl/nested-array-output"
+          labels:
+            pipeline: "nested-array-csv-example"
+            
+        - type: "debug"
+          config:
+            path: "/tmp/elasticetl/debug/nested-array"
+          labels:
+            pipeline: "nested-array-csv-example"
+
+global:
+  resource_limits:
+    max_memory_mb: 512
+    max_cpu_percent: 50
+    max_goroutines: 100
+    max_connections: 10
+  metrics:
+    enabled: true
+    port: 8080
+    path: "/metrics"
+    interval: "30s"
+  logging:
+    level: "info"
+    format: "json"
+    output: "stdout"

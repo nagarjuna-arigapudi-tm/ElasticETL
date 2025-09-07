@@ -3,6 +3,7 @@ package load
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/csv"
 	"encoding/json"
@@ -187,11 +188,11 @@ func (l *Loader) UpdateConfig(cfg config.LoadConfig) error {
 func createStream(cfg config.StreamConfig) (Stream, error) {
 	switch cfg.Type {
 	case "gem":
-		return NewGEMStream(cfg.Config, cfg.Labels)
+		return NewGEMStream(cfg.Config, cfg.Labels, cfg.InsecureTLS)
 	case "otel":
-		return NewOTELStream(cfg.Config, cfg.Labels)
+		return NewOTELStream(cfg.Config, cfg.Labels, cfg.InsecureTLS)
 	case "prometheus":
-		return NewPrometheusStream(cfg.Config, cfg.Labels)
+		return NewPrometheusStream(cfg.Config, cfg.Labels, cfg.InsecureTLS)
 	case "debug":
 		return NewDebugStream(cfg.Config)
 	case "csv":
@@ -209,7 +210,7 @@ type GEMStream struct {
 }
 
 // NewGEMStream creates a new GEM stream
-func NewGEMStream(config map[string]interface{}, labels map[string]string) (*GEMStream, error) {
+func NewGEMStream(config map[string]interface{}, labels map[string]string, insecureTLS bool) (*GEMStream, error) {
 	endpoint, ok := config["endpoint"].(string)
 	if !ok {
 		return nil, fmt.Errorf("gem stream requires 'endpoint' configuration")
@@ -222,11 +223,20 @@ func NewGEMStream(config map[string]interface{}, labels map[string]string) (*GEM
 		}
 	}
 
+	// Configure HTTP client with TLS settings
+	transport := &http.Transport{}
+	if insecureTLS {
+		transport.TLSClientConfig = &tls.Config{
+			InsecureSkipVerify: true,
+		}
+	}
+
 	return &GEMStream{
 		endpoint: endpoint,
 		labels:   labels,
 		httpClient: &http.Client{
-			Timeout: timeout,
+			Timeout:   timeout,
+			Transport: transport,
 		},
 	}, nil
 }
@@ -346,7 +356,7 @@ type OTELStream struct {
 }
 
 // NewOTELStream creates a new OTEL stream
-func NewOTELStream(config map[string]interface{}, labels map[string]string) (*OTELStream, error) {
+func NewOTELStream(config map[string]interface{}, labels map[string]string, insecureTLS bool) (*OTELStream, error) {
 	endpoint, ok := config["endpoint"].(string)
 	if !ok {
 		return nil, fmt.Errorf("otel stream requires 'endpoint' configuration")
@@ -359,11 +369,20 @@ func NewOTELStream(config map[string]interface{}, labels map[string]string) (*OT
 		}
 	}
 
+	// Configure HTTP client with TLS settings
+	transport := &http.Transport{}
+	if insecureTLS {
+		transport.TLSClientConfig = &tls.Config{
+			InsecureSkipVerify: true,
+		}
+	}
+
 	return &OTELStream{
 		endpoint: endpoint,
 		labels:   labels,
 		httpClient: &http.Client{
-			Timeout: timeout,
+			Timeout:   timeout,
+			Transport: transport,
 		},
 	}, nil
 }
@@ -495,7 +514,7 @@ type PrometheusStream struct {
 }
 
 // NewPrometheusStream creates a new Prometheus stream
-func NewPrometheusStream(config map[string]interface{}, labels map[string]string) (*PrometheusStream, error) {
+func NewPrometheusStream(config map[string]interface{}, labels map[string]string, insecureTLS bool) (*PrometheusStream, error) {
 	// Support both old endpoint format and new remote_write_url format
 	var endpoint string
 	if ep, ok := config["endpoint"].(string); ok {
@@ -513,11 +532,20 @@ func NewPrometheusStream(config map[string]interface{}, labels map[string]string
 		}
 	}
 
+	// Configure HTTP client with TLS settings
+	transport := &http.Transport{}
+	if insecureTLS {
+		transport.TLSClientConfig = &tls.Config{
+			InsecureSkipVerify: true,
+		}
+	}
+
 	stream := &PrometheusStream{
 		endpoint: endpoint,
 		labels:   labels,
 		httpClient: &http.Client{
-			Timeout: timeout,
+			Timeout:   timeout,
+			Transport: transport,
 		},
 	}
 

@@ -104,41 +104,67 @@ func (t *Transformer) substituteZerosForNull(data map[string]interface{}) {
 	}
 }
 
-// applyConversionFunction applies a conversion function to a field
+// applyConversionFunction applies a conversion function to fields matching regex pattern
 func (t *Transformer) applyConversionFunction(data map[string]interface{}, convFunc config.ConversionFunctionConfig) error {
-	value, exists := data[convFunc.Field]
-	if !exists {
-		return nil // Field doesn't exist, skip
+	// Compile regex pattern for field matching
+	regex, err := regexp.Compile(convFunc.Field)
+	if err != nil {
+		// If regex is invalid, try exact match as fallback
+		value, exists := data[convFunc.Field]
+		if !exists {
+			return nil // Field doesn't exist, skip
+		}
+		return t.applyConversionToValue(data, convFunc.Field, value, convFunc)
 	}
 
+	// Apply conversion to all matching fields
+	matchedAny := false
+	for key, value := range data {
+		if regex.MatchString(key) {
+			matchedAny = true
+			if err := t.applyConversionToValue(data, key, value, convFunc); err != nil {
+				return fmt.Errorf("conversion failed for field %s: %w", key, err)
+			}
+		}
+	}
+
+	if !matchedAny {
+		return nil // No fields matched, skip
+	}
+
+	return nil
+}
+
+// applyConversionToValue applies conversion function to a specific field value
+func (t *Transformer) applyConversionToValue(data map[string]interface{}, fieldKey string, value interface{}, convFunc config.ConversionFunctionConfig) error {
 	switch convFunc.Function {
 	case "convert_type":
 		converted, err := t.convertType(value, convFunc.FromType, convFunc.ToType)
 		if err != nil {
 			return err
 		}
-		data[convFunc.Field] = converted
+		data[fieldKey] = converted
 
 	case "convert_to_kb":
 		converted, err := t.convertToKB(value, convFunc.FromUnit)
 		if err != nil {
 			return err
 		}
-		data[convFunc.Field] = converted
+		data[fieldKey] = converted
 
 	case "convert_to_mb":
 		converted, err := t.convertToMB(value, convFunc.FromUnit)
 		if err != nil {
 			return err
 		}
-		data[convFunc.Field] = converted
+		data[fieldKey] = converted
 
 	case "convert_to_gb":
 		converted, err := t.convertToGB(value, convFunc.FromUnit)
 		if err != nil {
 			return err
 		}
-		data[convFunc.Field] = converted
+		data[fieldKey] = converted
 
 	default:
 		return fmt.Errorf("unknown conversion function: %s", convFunc.Function)
@@ -699,8 +725,12 @@ func (t *Transformer) formatValue(value interface{}) string {
 		return v
 	case int, int64, int32:
 		return fmt.Sprintf("%d", v)
-	case float64, float32:
-		return fmt.Sprintf("%g", v)
+	case float64:
+		// Use fixed-point notation to preserve precision and avoid exponential form
+		return fmt.Sprintf("%.15f", v)
+	case float32:
+		// Use fixed-point notation to preserve precision and avoid exponential form
+		return fmt.Sprintf("%.7f", v)
 	case bool:
 		if v {
 			return "true"

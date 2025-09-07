@@ -3,6 +3,7 @@ package extract
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -52,11 +53,21 @@ type Extractor struct {
 // NewExtractor creates a new extractor
 func NewExtractor(cfg config.ExtractConfig) *Extractor {
 	macroSubstituter := utils.NewMacroSubstituter(cfg.StartTime, cfg.EndTime)
+
+	// Configure HTTP client with TLS settings
+	transport := &http.Transport{}
+	if cfg.InsecureTLS {
+		transport.TLSClientConfig = &tls.Config{
+			InsecureSkipVerify: true,
+		}
+	}
+
 	return &Extractor{
 		config:           cfg,
 		macroSubstituter: macroSubstituter,
 		httpClient: &http.Client{
-			Timeout: cfg.Timeout,
+			Timeout:   cfg.Timeout,
+			Transport: transport,
 		},
 	}
 }

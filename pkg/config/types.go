@@ -136,9 +136,26 @@ type MetricColumnConfig struct {
 
 // PrometheusConfig defines Prometheus-specific configuration
 type PrometheusConfig struct {
-	RemoteWriteURL string               `json:"remote_write_url" yaml:"remote_write_url"`
-	DynamicLabels  []DynamicLabelConfig `json:"dynamic_labels,omitempty" yaml:"dynamic_labels,omitempty"`
-	MetricColumns  []MetricColumnConfig `json:"metric_columns,omitempty" yaml:"metric_columns,omitempty"`
+	RemoteWriteURL string                   `json:"remote_write_url" yaml:"remote_write_url"`
+	DynamicLabels  []DynamicLabelConfig     `json:"dynamic_labels,omitempty" yaml:"dynamic_labels,omitempty"`
+	MetricColumns  []MetricColumnConfig     `json:"metric_columns,omitempty" yaml:"metric_columns,omitempty"`
+	Metrics        []PrometheusMetricConfig `json:"metrics,omitempty" yaml:"metrics,omitempty"`
+}
+
+// PrometheusMetricConfig defines how to create timeseries from CSV data
+type PrometheusMetricConfig struct {
+	Name              string                  `json:"name" yaml:"name"`
+	UniqueFieldsIndex []int                   `json:"uniquefieldsIndex" yaml:"uniquefieldsIndex"`
+	Value             int                     `json:"value" yaml:"value"`
+	Timestamp         int                     `json:"timestamp" yaml:"timestamp"`
+	Labels            []PrometheusLabelConfig `json:"labels,omitempty" yaml:"labels,omitempty"`
+}
+
+// PrometheusLabelConfig defines label configuration for Prometheus metrics
+type PrometheusLabelConfig struct {
+	LabelName      string `json:"label_name" yaml:"label_name"`
+	IndexInCSVData int    `json:"index_in_csv_data" yaml:"index_in_csv_data"`
+	StaticValue    string `json:"static_value,omitempty" yaml:"static_value,omitempty"`
 }
 
 // OTELConfig defines OpenTelemetry collector configuration

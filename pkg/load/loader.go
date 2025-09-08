@@ -686,7 +686,8 @@ func (p *PrometheusStream) GetType() string {
 
 // DebugStream handles loading to debug files
 type DebugStream struct {
-	path string
+	path   string
+	format string // "json", "prometheus", "otel"
 }
 
 // NewDebugStream creates a new debug stream
@@ -696,8 +697,14 @@ func NewDebugStream(config map[string]interface{}) (*DebugStream, error) {
 		return nil, fmt.Errorf("debug stream requires 'path' configuration")
 	}
 
+	format := "json" // default format
+	if f, ok := config["format"].(string); ok {
+		format = f
+	}
+
 	return &DebugStream{
-		path: path,
+		path:   path,
+		format: format,
 	}, nil
 }
 
@@ -709,32 +716,162 @@ func (d *DebugStream) Load(ctx context.Context, results []*transform.Transformed
 		return fmt.Errorf("failed to create debug directory: %w", err)
 	}
 
-	// Create debug output with timestamp
-	debugData := map[string]interface{}{
-		"timestamp":     time.Now().Format(time.RFC3339),
-		"pipeline":      "load",
-		"results_count": len(results),
-		"results":       results,
+	var outputData []byte
+	var fileExtension string
+	var err error
+
+	switch d.format {
+	case "prometheus":
+		// Generate Prometheus timeseries format
+		outputData, fileExtension, err = d.generatePrometheusFormat(results)
+	case "otel":
+		// Generate OTEL format
+		outputData, fileExtension, err = d.generateOTELFormat(results)
+	default:
+		// Default JSON format
+		outputData, fileExtension, err = d.generateJSONFormat(results)
 	}
 
-	// Marshal to JSON
-	jsonData, err := json.MarshalIndent(debugData, "", "  ")
 	if err != nil {
-		return fmt.Errorf("failed to marshal debug data: %w", err)
+		return fmt.Errorf("failed to generate debug output: %w", err)
 	}
 
 	// Generate filename with timestamp
 	timestamp := time.Now().Format("20060102_150405")
-	filename := fmt.Sprintf("%s_load_%s.json", filepath.Base(d.path), timestamp)
+	filename := fmt.Sprintf("%s_load_%s.%s", filepath.Base(d.path), timestamp, fileExtension)
 	fullPath := filepath.Join(debugDir, filename)
 
 	// Write to file
-	if err := os.WriteFile(fullPath, jsonData, 0644); err != nil {
+	if err := os.WriteFile(fullPath, outputData, 0644); err != nil {
 		return fmt.Errorf("failed to write debug file: %w", err)
 	}
 
-	fmt.Printf("Debug load output written to: %s\n", fullPath)
+	fmt.Printf("Debug load output (%s format) written to: %s\n", d.format, fullPath)
 	return nil
+}
+
+// generateJSONFormat generates the default JSON debug format
+func (d *DebugStream) generateJSONFormat(results []*transform.TransformedResult) ([]byte, string, error) {
+	debugData := map[string]interface{}{
+		"timestamp":     time.Now().Format(time.RFC3339),
+		"pipeline":      "load",
+		"format":        "json",
+		"results_count": len(results),
+		"results":       results,
+	}
+
+	jsonData, err := json.MarshalIndent(debugData, "", "  ")
+	return jsonData, "json", err
+}
+
+// generatePrometheusFormat generates Prometheus timeseries format
+func (d *DebugStream) generatePrometheusFormat(results []*transform.TransformedResult) ([]byte, string, error) {
+	var lines []string
+
+	// Add header comment
+	lines = append(lines, fmt.Sprintf("# ElasticETL Debug Output - Prometheus Format"))
+	lines = append(lines, fmt.Sprintf("# Generated at: %s", time.Now().Format(time.RFC3339)))
+	lines = append(lines, fmt.Sprintf("# Results count: %d", len(results)))
+	lines = append(lines, "")
+
+	for _, result := range results {
+		for key, value := range result.TransformedData {
+			if numValue, ok := d.toFloat64(value); ok {
+				// Build labels string
+				labelPairs := []string{fmt.Sprintf(`source="%s"`, result.Source)}
+
+				// Add cluster name from metadata if available
+				if clusterName, ok := result.Metadata["cluster_name"].(string); ok && clusterName != "" {
+					labelPairs = append(labelPairs, fmt.Sprintf(`cluster="%s"`, clusterName))
+				}
+
+				labelsStr := strings.Join(labelPairs, ",")
+				line := fmt.Sprintf(`%s{%s} %f %d`,
+					key, labelsStr, numValue, result.Timestamp.UnixMilli())
+				lines = append(lines, line)
+			}
+		}
+	}
+
+	output := strings.Join(lines, "\n") + "\n"
+	return []byte(output), "txt", nil
+}
+
+// generateOTELFormat generates OTEL collector format
+func (d *DebugStream) generateOTELFormat(results []*transform.TransformedResult) ([]byte, string, error) {
+	var metrics []map[string]interface{}
+
+	for _, result := range results {
+		// Create attributes map with source
+		attributes := map[string]interface{}{
+			"source": result.Source,
+		}
+
+		// Add cluster name from metadata if available
+		if clusterName, ok := result.Metadata["cluster_name"].(string); ok && clusterName != "" {
+			attributes["cluster"] = clusterName
+		}
+
+		metric := map[string]interface{}{
+			"name":        "elasticetl_metric",
+			"description": "Metric from ElasticETL",
+			"unit":        "1",
+			"data": map[string]interface{}{
+				"dataPoints": []map[string]interface{}{
+					{
+						"attributes":   attributes,
+						"timeUnixNano": result.Timestamp.UnixNano(),
+						"value":        result.TransformedData,
+					},
+				},
+			},
+		}
+		metrics = append(metrics, metric)
+	}
+
+	otelData := map[string]interface{}{
+		"timestamp": time.Now().Format(time.RFC3339),
+		"pipeline":  "load",
+		"format":    "otel",
+		"resourceMetrics": []map[string]interface{}{
+			{
+				"resource": map[string]interface{}{
+					"attributes": []map[string]interface{}{
+						{
+							"key":   "service.name",
+							"value": map[string]string{"stringValue": "elasticetl"},
+						},
+					},
+				},
+				"scopeMetrics": []map[string]interface{}{
+					{
+						"scope": map[string]interface{}{
+							"name":    "elasticetl",
+							"version": "1.0.0",
+						},
+						"metrics": metrics,
+					},
+				},
+			},
+		},
+	}
+
+	jsonData, err := json.MarshalIndent(otelData, "", "  ")
+	return jsonData, "json", err
+}
+
+// toFloat64 converts a value to float64 if possible
+func (d *DebugStream) toFloat64(value interface{}) (float64, bool) {
+	switch v := value.(type) {
+	case float64:
+		return v, true
+	case int:
+		return float64(v), true
+	case int64:
+		return float64(v), true
+	default:
+		return 0, false
+	}
 }
 
 // Close closes the debug stream

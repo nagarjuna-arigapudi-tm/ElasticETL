@@ -1,0 +1,96 @@
+# ElasticETL Configuration with Debug Stream Format Examples
+pipelines:
+  - name: "sample-pipeline"
+    enabled: true
+    interval: "30s"
+    
+    extract:
+      elasticsearch_query: |
+        {
+          "query": {
+            "range": {
+              "@timestamp": {
+                "gte": "now-5m"
+              }
+            }
+          },
+          "size": 100
+        }
+      urls:
+        - "https://elasticsearch.example.com:9200"
+      cluster_names:
+        - "production-cluster"
+      json_path: "hits.hits._source"
+      timeout: "30s"
+      max_retries: 3
+      insecure_tls: false
+    
+    transform:
+      stateless: true
+      substitute_zeros_for_null: true
+      output_format: "json"
+      conversion_functions:
+        - field: "cpu_.*"
+          function: "convert_type"
+          to_type: "float64"
+    
+    load:
+      streams:
+        # Debug stream with default JSON format
+        - type: "debug"
+          config:
+            path: "/tmp/elasticetl/debug/json-output"
+            format: "json"  # Default format - outputs standard JSON debug info
+        
+        # Debug stream with Prometheus format
+        - type: "debug"
+          config:
+            path: "/tmp/elasticetl/debug/prometheus-output"
+            format: "prometheus"  # Outputs Prometheus timeseries format
+        
+        # Debug stream with OTEL format
+        - type: "debug"
+          config:
+            path: "/tmp/elasticetl/debug/otel-output"
+            format: "otel"  # Outputs OTEL collector format
+        
+        # Regular Prometheus stream for comparison
+        - type: "prometheus"
+          config:
+            endpoint: "https://prometheus-pushgateway.example.com/metrics/job/elasticetl"
+            timeout: "30s"
+          basic_auth:
+            username: "${PROMETHEUS_USER}"
+            password: "${PROMETHEUS_PASS}"
+          insecure_tls: false
+          labels:
+            environment: "production"
+            service: "elasticetl"
+        
+        # Regular OTEL stream for comparison
+        - type: "otel"
+          config:
+            endpoint: "https://otel-collector.example.com/v1/metrics"
+            timeout: "30s"
+          insecure_tls: false
+          labels:
+            environment: "production"
+            service: "elasticetl"
+
+global:
+  resource_limits:
+    max_memory_mb: 512
+    max_cpu_percent: 50
+    max_goroutines: 100
+    max_connections: 50
+  
+  metrics:
+    enabled: true
+    port: 8080
+    path: "/metrics"
+    interval: "15s"
+  
+  logging:
+    level: "info"
+    format: "json"
+    output: "stdout"

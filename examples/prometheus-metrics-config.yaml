@@ -1,0 +1,126 @@
+# ElasticETL Configuration - Prometheus Metrics with CSV Data
+# This example shows how to create Prometheus time series from CSV data
+# using the metrics configuration format
+
+pipelines:
+  - name: "load-balancer-metrics"
+    enabled: true
+    interval: "30s"
+    
+    extract:
+      elasticsearch_query: |
+        {
+          "query": {
+            "range": {
+              "@timestamp": {
+                "gte": "now-5m",
+                "lte": "now"
+              }
+            }
+          },
+          "size": 1000,
+          "_source": ["load_balancer", "timestamp", "cpu_usage", "requests_processed"]
+        }
+      urls:
+        - "https://elasticsearch.example.com:9200"
+      cluster_names:
+        - "production-cluster"
+      auth_headers:
+        - "Bearer ${ES_TOKEN}"
+      json_path: "hits.hits"
+      timeout: "30s"
+      max_retries: 3
+      
+    transform:
+      stateless: true
+      substitute_zeros_for_null: true
+      previous_results_sets: 1
+      output_format: "csv"
+      conversion_functions:
+        - field: "_source.cpu_usage"
+          function: "convert_type"
+          from_type: "string"
+          to_type: "float"
+        - field: "_source.requests_processed"
+          function: "convert_type"
+          from_type: "string"
+          to_type: "int"
+          
+    load:
+      streams:
+        # Debug stream with Prometheus format to see the generated time series
+        - type: "debug"
+          config:
+            path: "/tmp/elasticetl/debug/prometheus-metrics"
+            format: "prometheus"
+            # Metrics configuration for creating time series from CSV data
+            metrics:
+              - name: "cpuusage"
+                uniquefieldsIndex: [0]  # Group by load balancer name (column 0)
+                value: 2                # CPU usage value is in column 2
+                timestamp: 1            # Timestamp is in column 1
+                labels:
+                  - label_name: "LB_Name"
+                    index_in_csv_data: 0  # Load balancer name from column 0
+                  - label_name: "job"
+                    static_value: "elasticsearch-etl"
+                    
+              - name: "requestsProcessed"
+                uniquefieldsIndex: [0]  # Group by load balancer name (column 0)
+                value: 3                # Requests processed value is in column 3
+                timestamp: 1            # Timestamp is in column 1
+                labels:
+                  - label_name: "LoadBalancer"
+                    index_in_csv_data: 0  # Load balancer name from column 0
+                  - label_name: "job"
+                    static_value: "elasticsearch-etl"
+        
+        # GEM stream for Prometheus remote write
+        - type: "gem"
+          config:
+            endpoint: "https://prometheus.example.com/api/v1/write"
+            timeout: "30s"
+            # Same metrics configuration for remote write
+            metrics:
+              - name: "cpuusage"
+                uniquefieldsIndex: [0]
+                value: 2
+                timestamp: 1
+                labels:
+                  - label_name: "LB_Name"
+                    index_in_csv_data: 0
+                  - label_name: "job"
+                    static_value: "elasticsearch-etl"
+                    
+              - name: "requestsProcessed"
+                uniquefieldsIndex: [0]
+                value: 3
+                timestamp: 1
+                labels:
+                  - label_name: "LoadBalancer"
+                    index_in_csv_data: 0
+                  - label_name: "job"
+                    static_value: "elasticsearch-etl"
+          basic_auth:
+            username: "${PROMETHEUS_USER}"
+            password: "${PROMETHEUS_PASSWORD}"
+          insecure_tls: false
+          labels:
+            environment: "production"
+            service: "load-balancer-monitoring"
+
+global:
+  resource_limits:
+    max_memory_mb: 512
+    max_cpu_percent: 50
+    max_goroutines: 100
+    max_connections: 50
+  metrics:
+    enabled: true
+    port: 8080
+    path: "/metrics"
+    interval: "15s"
+  logging:
+    level: "info"
+    format: "json"
+    output: "stdout"

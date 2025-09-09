@@ -1,0 +1,64 @@
+# Simple ElasticETL Example Configuration
+# This is a minimal configuration to get started with ElasticETL
+
+pipelines:
+  - name: "simple-example"
+    enabled: true
+    interval: "120s"
+    
+    extract:
+      elasticsearch_query: |
+        {
+          "query": {
+            "match_all": {}
+          },
+          "size": 0,
+          "aggs": {
+            "doc_count": {
+              "value_count": {
+                "field": "_id"
+              }
+            }
+          }
+        }
+      urls:
+        - "http://localhost:9200/test-index/_search"
+      cluster_names:
+        - "local"
+      json_path: "aggregations.doc_count"
+      timeout: "30s"
+      max_retries: 2
+    
+    transform:
+      stateless: true
+      substitute_zeros_for_null: true
+      output_format: "json"
+      conversion_functions:
+        - field: "value"
+          function: "convert_type"
+          to_type: "int64"
+    
+    load:
+      streams:
+        - type: "debug"
+          config:
+            path: "/tmp/elasticetl/simple-example"
+            format: "json"
+
+global:
+  resource_limits:
+    max_memory_mb: 128
+    max_cpu_percent: 30
+    max_goroutines: 25
+    max_connections: 10
+  
+  metrics:
+    enabled: true
+    port: 8080
+    path: "/metrics"
+    interval: "60s"
+  
+  logging:
+    level: "info"
+    format: "text"
+    output: "stdout"

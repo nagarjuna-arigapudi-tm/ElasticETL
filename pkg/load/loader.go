@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -281,13 +282,27 @@ func (g *GEMStream) Load(ctx context.Context, results []*transform.TransformedRe
 	return nil
 }
 
-// convertToPrometheusSamples converts transformed results to Prometheus samples
+// convertToPrometheusSamples converts transformed results to Prometheus samples using CSV data
 func (g *GEMStream) convertToPrometheusSamples(results []*transform.TransformedResult) []map[string]interface{} {
 	var samples []map[string]interface{}
 
 	for _, result := range results {
-		timestamp := result.Timestamp.UnixMilli()
+		// Use CSV data to create time series if available
+		if len(result.CSVData) > 0 {
+			// Parse metrics configuration from result metadata if available
+			metricsConfig := g.parseMetricsConfig(result)
+			if len(metricsConfig) > 0 {
+				// Generate time series for each metric using CSV data
+				for _, metric := range metricsConfig {
+					metricSamples := g.createPrometheusTimeSeriesForMetric(result.CSVData, metric)
+					samples = append(samples, metricSamples...)
+				}
+				continue
+			}
+		}
 
+		// Fallback to old behavior using TransformedData
+		timestamp := result.Timestamp.UnixMilli()
 		for key, value := range result.TransformedData {
 			// Only include numeric values as metrics
 			if numValue, ok := g.toFloat64(value); ok {
@@ -322,6 +337,175 @@ func (g *GEMStream) convertToPrometheusSamples(results []*transform.TransformedR
 	}
 
 	return samples
+}
+
+// parseMetricsConfig extracts metrics configuration from result metadata for GEM stream
+func (g *GEMStream) parseMetricsConfig(result *transform.TransformedResult) []config.PrometheusMetricConfig {
+	var metrics []config.PrometheusMetricConfig
+
+	// Try to get metrics config from metadata
+	if metricsRaw, ok := result.Metadata["metrics"]; ok {
+		if metricsList, ok := metricsRaw.([]interface{}); ok {
+			for _, metricRaw := range metricsList {
+				if metricMap, ok := metricRaw.(map[string]interface{}); ok {
+					var metric config.PrometheusMetricConfig
+
+					if name, ok := metricMap["name"].(string); ok {
+						metric.Name = name
+					}
+
+					if value, ok := metricMap["value"].(int); ok {
+						metric.Value = value
+					}
+
+					if timestamp, ok := metricMap["timestamp"].(int); ok {
+						metric.Timestamp = timestamp
+					}
+
+					if uniqueFields, ok := metricMap["uniquefieldsIndex"].([]interface{}); ok {
+						for _, field := range uniqueFields {
+							if idx, ok := field.(int); ok {
+								metric.UniqueFieldsIndex = append(metric.UniqueFieldsIndex, idx)
+							}
+						}
+					}
+
+					if labelsRaw, ok := metricMap["labels"].([]interface{}); ok {
+						for _, labelRaw := range labelsRaw {
+							if labelMap, ok := labelRaw.(map[string]interface{}); ok {
+								var label config.PrometheusLabelConfig
+
+								if labelName, ok := labelMap["label_name"].(string); ok {
+									label.LabelName = labelName
+								}
+
+								if indexInCSV, ok := labelMap["index_in_csv_data"].(int); ok {
+									label.IndexInCSVData = indexInCSV
+								}
+
+								if staticValue, ok := labelMap["static_value"].(string); ok {
+									label.StaticValue = staticValue
+								}
+
+								metric.Labels = append(metric.Labels, label)
+							}
+						}
+					}
+
+					metrics = append(metrics, metric)
+				}
+			}
+		}
+	}
+
+	return metrics
+}
+
+// createPrometheusTimeSeriesForMetric creates Prometheus remote write time series for a specific metric
+func (g *GEMStream) createPrometheusTimeSeriesForMetric(csvData [][]string, metric config.PrometheusMetricConfig) []map[string]interface{} {
+	var samples []map[string]interface{}
+
+	// Group CSV rows by unique field combinations
+	uniqueGroups := make(map[string][]map[string]interface{})
+
+	for _, row := range csvData {
+		if len(row) <= metric.Value || len(row) <= metric.Timestamp {
+			continue // Skip rows that don't have required columns
+		}
+
+		// Create unique key from uniqueFieldsIndex
+		var keyParts []string
+		for _, idx := range metric.UniqueFieldsIndex {
+			if idx < len(row) {
+				keyParts = append(keyParts, row[idx])
+			}
+		}
+		uniqueKey := strings.Join(keyParts, "|")
+
+		// Parse value and timestamp
+		value, ok := g.parseFloat(row[metric.Value])
+		if !ok {
+			continue
+		}
+
+		timestamp, ok := g.parseInt64(row[metric.Timestamp])
+		if !ok {
+			continue
+		}
+
+		// Create sample
+		sample := map[string]interface{}{
+			"value":     value,
+			"timestamp": timestamp,
+			"row":       row,
+		}
+
+		uniqueGroups[uniqueKey] = append(uniqueGroups[uniqueKey], sample)
+	}
+
+	// Generate time series for each unique group
+	for _, groupSamples := range uniqueGroups {
+		if len(groupSamples) == 0 {
+			continue
+		}
+
+		// Build labels from first sample in group
+		firstSample := groupSamples[0]
+		row := firstSample["row"].([]string)
+
+		labels := map[string]string{
+			"__name__": metric.Name,
+		}
+
+		// Add dynamic labels
+		for _, label := range metric.Labels {
+			if label.StaticValue != "" {
+				labels[label.LabelName] = label.StaticValue
+			} else if label.IndexInCSVData < len(row) {
+				labels[label.LabelName] = row[label.IndexInCSVData]
+			}
+		}
+
+		// Add configured labels
+		for labelKey, labelValue := range g.labels {
+			labels[labelKey] = labelValue
+		}
+
+		// Create samples array for this time series
+		var timeSeriesSamples []map[string]interface{}
+		for _, sample := range groupSamples {
+			timeSeriesSamples = append(timeSeriesSamples, map[string]interface{}{
+				"value":     sample["value"],
+				"timestamp": sample["timestamp"],
+			})
+		}
+
+		// Create time series
+		timeSeries := map[string]interface{}{
+			"labels":  []map[string]string{labels},
+			"samples": timeSeriesSamples,
+		}
+
+		samples = append(samples, timeSeries)
+	}
+
+	return samples
+}
+
+// parseFloat parses a string to float64 for GEM stream
+func (g *GEMStream) parseFloat(s string) (float64, bool) {
+	if f, err := strconv.ParseFloat(s, 64); err == nil {
+		return f, true
+	}
+	return 0, false
+}
+
+// parseInt64 parses a string to int64 for GEM stream
+func (g *GEMStream) parseInt64(s string) (int64, bool) {
+	if i, err := strconv.ParseInt(s, 10, 64); err == nil {
+		return i, true
+	}
+	return 0, false
 }
 
 // toFloat64 converts a value to float64 if possible
@@ -764,7 +948,7 @@ func (d *DebugStream) generateJSONFormat(results []*transform.TransformedResult)
 	return jsonData, "json", err
 }
 
-// generatePrometheusFormat generates Prometheus timeseries format
+// generatePrometheusFormat generates Prometheus timeseries format using CSV data
 func (d *DebugStream) generatePrometheusFormat(results []*transform.TransformedResult) ([]byte, string, error) {
 	var lines []string
 
@@ -775,26 +959,212 @@ func (d *DebugStream) generatePrometheusFormat(results []*transform.TransformedR
 	lines = append(lines, "")
 
 	for _, result := range results {
-		for key, value := range result.TransformedData {
-			if numValue, ok := d.toFloat64(value); ok {
-				// Build labels string
-				labelPairs := []string{fmt.Sprintf(`source="%s"`, result.Source)}
+		// Use CSV data to create time series
+		if len(result.CSVData) == 0 {
+			continue
+		}
 
-				// Add cluster name from metadata if available
-				if clusterName, ok := result.Metadata["cluster_name"].(string); ok && clusterName != "" {
-					labelPairs = append(labelPairs, fmt.Sprintf(`cluster="%s"`, clusterName))
-				}
+		// Parse metrics configuration from result metadata if available
+		metricsConfig := d.parseMetricsConfig(result)
+		if len(metricsConfig) == 0 {
+			// Fallback to old behavior if no metrics config
+			d.generateFallbackPrometheusFormat(result, &lines)
+			continue
+		}
 
-				labelsStr := strings.Join(labelPairs, ",")
-				line := fmt.Sprintf(`%s{%s} %f %d`,
-					key, labelsStr, numValue, result.Timestamp.UnixMilli())
-				lines = append(lines, line)
+		// Generate time series for each metric
+		for _, metric := range metricsConfig {
+			timeSeries := d.createTimeSeriesForMetric(result.CSVData, metric)
+			for _, ts := range timeSeries {
+				lines = append(lines, ts)
 			}
 		}
 	}
 
 	output := strings.Join(lines, "\n") + "\n"
 	return []byte(output), "txt", nil
+}
+
+// parseMetricsConfig extracts metrics configuration from result metadata
+func (d *DebugStream) parseMetricsConfig(result *transform.TransformedResult) []config.PrometheusMetricConfig {
+	var metrics []config.PrometheusMetricConfig
+
+	// Try to get metrics config from metadata
+	if metricsRaw, ok := result.Metadata["metrics"]; ok {
+		if metricsList, ok := metricsRaw.([]interface{}); ok {
+			for _, metricRaw := range metricsList {
+				if metricMap, ok := metricRaw.(map[string]interface{}); ok {
+					var metric config.PrometheusMetricConfig
+
+					if name, ok := metricMap["name"].(string); ok {
+						metric.Name = name
+					}
+
+					if value, ok := metricMap["value"].(int); ok {
+						metric.Value = value
+					}
+
+					if timestamp, ok := metricMap["timestamp"].(int); ok {
+						metric.Timestamp = timestamp
+					}
+
+					if uniqueFields, ok := metricMap["uniquefieldsIndex"].([]interface{}); ok {
+						for _, field := range uniqueFields {
+							if idx, ok := field.(int); ok {
+								metric.UniqueFieldsIndex = append(metric.UniqueFieldsIndex, idx)
+							}
+						}
+					}
+
+					if labelsRaw, ok := metricMap["labels"].([]interface{}); ok {
+						for _, labelRaw := range labelsRaw {
+							if labelMap, ok := labelRaw.(map[string]interface{}); ok {
+								var label config.PrometheusLabelConfig
+
+								if labelName, ok := labelMap["label_name"].(string); ok {
+									label.LabelName = labelName
+								}
+
+								if indexInCSV, ok := labelMap["index_in_csv_data"].(int); ok {
+									label.IndexInCSVData = indexInCSV
+								}
+
+								if staticValue, ok := labelMap["static_value"].(string); ok {
+									label.StaticValue = staticValue
+								}
+
+								metric.Labels = append(metric.Labels, label)
+							}
+						}
+					}
+
+					metrics = append(metrics, metric)
+				}
+			}
+		}
+	}
+
+	return metrics
+}
+
+// createTimeSeriesForMetric creates time series for a specific metric
+func (d *DebugStream) createTimeSeriesForMetric(csvData [][]string, metric config.PrometheusMetricConfig) []string {
+	var lines []string
+
+	// Group CSV rows by unique field combinations
+	uniqueGroups := make(map[string][]map[string]interface{})
+
+	for _, row := range csvData {
+		if len(row) <= metric.Value || len(row) <= metric.Timestamp {
+			continue // Skip rows that don't have required columns
+		}
+
+		// Create unique key from uniqueFieldsIndex
+		var keyParts []string
+		for _, idx := range metric.UniqueFieldsIndex {
+			if idx < len(row) {
+				keyParts = append(keyParts, row[idx])
+			}
+		}
+		uniqueKey := strings.Join(keyParts, "|")
+
+		// Parse value and timestamp
+		value, ok := d.parseFloat(row[metric.Value])
+		if !ok {
+			continue
+		}
+
+		timestamp, ok := d.parseInt64(row[metric.Timestamp])
+		if !ok {
+			continue
+		}
+
+		// Create sample
+		sample := map[string]interface{}{
+			"value":     value,
+			"timestamp": timestamp,
+			"row":       row,
+		}
+
+		uniqueGroups[uniqueKey] = append(uniqueGroups[uniqueKey], sample)
+	}
+
+	// Generate time series for each unique group
+	for _, samples := range uniqueGroups {
+		if len(samples) == 0 {
+			continue
+		}
+
+		// Build labels from first sample in group
+		firstSample := samples[0]
+		row := firstSample["row"].([]string)
+
+		var labelPairs []string
+		labelPairs = append(labelPairs, fmt.Sprintf(`__name__="%s"`, metric.Name))
+
+		// Add dynamic labels
+		for _, label := range metric.Labels {
+			if label.StaticValue != "" {
+				labelPairs = append(labelPairs, fmt.Sprintf(`%s="%s"`, label.LabelName, label.StaticValue))
+			} else if label.IndexInCSVData < len(row) {
+				labelPairs = append(labelPairs, fmt.Sprintf(`%s="%s"`, label.LabelName, row[label.IndexInCSVData]))
+			}
+		}
+
+		labelsStr := strings.Join(labelPairs, ", ")
+
+		// Generate timeseries block
+		lines = append(lines, fmt.Sprintf("timeseries {"))
+		lines = append(lines, fmt.Sprintf("  labels: { %s }", labelsStr))
+
+		// Add all samples for this unique group
+		for _, sample := range samples {
+			value := sample["value"].(float64)
+			timestamp := sample["timestamp"].(int64)
+			lines = append(lines, fmt.Sprintf("  samples: { timestamp: %d, value: %g }", timestamp, value))
+		}
+
+		lines = append(lines, "}")
+		lines = append(lines, "")
+	}
+
+	return lines
+}
+
+// generateFallbackPrometheusFormat generates fallback format when no metrics config is available
+func (d *DebugStream) generateFallbackPrometheusFormat(result *transform.TransformedResult, lines *[]string) {
+	for key, value := range result.TransformedData {
+		if numValue, ok := d.toFloat64(value); ok {
+			// Build labels string
+			labelPairs := []string{fmt.Sprintf(`source="%s"`, result.Source)}
+
+			// Add cluster name from metadata if available
+			if clusterName, ok := result.Metadata["cluster_name"].(string); ok && clusterName != "" {
+				labelPairs = append(labelPairs, fmt.Sprintf(`cluster="%s"`, clusterName))
+			}
+
+			labelsStr := strings.Join(labelPairs, ",")
+			line := fmt.Sprintf(`%s{%s} %f %d`,
+				key, labelsStr, numValue, result.Timestamp.UnixMilli())
+			*lines = append(*lines, line)
+		}
+	}
+}
+
+// parseFloat parses a string to float64
+func (d *DebugStream) parseFloat(s string) (float64, bool) {
+	if f, err := strconv.ParseFloat(s, 64); err == nil {
+		return f, true
+	}
+	return 0, false
+}
+
+// parseInt64 parses a string to int64
+func (d *DebugStream) parseInt64(s string) (int64, bool) {
+	if i, err := strconv.ParseInt(s, 10, 64); err == nil {
+		return i, true
+	}
+	return 0, false
 }
 
 // generateOTELFormat generates OTEL collector format

@@ -1,0 +1,229 @@
+# Production ElasticETL Configuration
+# This configuration demonstrates production-ready features including authentication,
+# multiple streams, CSV output, and comprehensive monitoring
+
+pipelines:
+  - name: "production-metrics"
+    enabled: true
+    interval: "30s"
+    
+    extract:
+      elasticsearch_query: |
+        {
+          "query": {
+            "bool": {
+              "must": [
+                {
+                  "range": {
+                    "@timestamp": {
+                      "gte": "now-1m"
+                    }
+                  }
+                },
+                {
+                  "term": {
+                    "environment": "production"
+                  }
+                }
+              ]
+            }
+          },
+          "aggs": {
+            "avg_cpu": {
+              "avg": {
+                "field": "system.cpu.percent"
+              }
+            },
+            "avg_memory": {
+              "avg": {
+                "field": "system.memory.percent"
+              }
+            },
+            "max_response_time": {
+              "max": {
+                "field": "response_time_ms"
+              }
+            }
+          }
+        }
+      urls:
+        - "https://elasticsearch-prod.company.com:9200/metrics-*/_search"
+        - "https://elasticsearch-backup.company.com:9200/metrics-*/_search"
+      cluster_names:
+        - "production-primary"
+        - "production-backup"
+      auth_headers:
+        - "Bearer ${ES_TOKEN_PRIMARY}"
+        - "Bearer ${ES_TOKEN_BACKUP}"
+      additional_headers:
+        - ["X-Environment: production", "X-Team: platform"]
+        - ["X-Environment: production", "X-Team: platform"]
+      json_path: "aggregations"
+      timeout: "45s"
+      max_retries: 3
+      insecure_tls: false
+      filters:
+        - type: "include"
+          pattern: "avg_.*|max_.*"
+        - type: "exclude"
+          pattern: ".*_bucket.*"
+      debug:
+        enabled: false
+        path: "/var/log/elasticetl/debug/extract"
+    
+    transform:
+      stateless: true
+      substitute_zeros_for_null: true
+      previous_results_sets: 0
+      output_format: "csv"
+      conversion_functions:
+        - field: "avg_cpu\\.value"
+          function: "convert_type"
+          to_type: "float64"
+        - field: "avg_memory\\.value"
+          function: "convert_type"
+          to_type: "float64"
+        - field: "max_response_time\\.value"
+          function: "convert_type"
+          to_type: "float64"
+    
+    load:
+      streams:
+        # Primary Prometheus endpoint
+        - type: "prometheus"
+          config:
+            endpoint: "https://prometheus.company.com/api/v1/write"
+            timeout: "30s"
+          basic_auth:
+            username: "${PROMETHEUS_USER}"
+            password: "${PROMETHEUS_PASS}"
+          insecure_tls: false
+          labels:
+            environment: "production"
+            service: "system-metrics"
+            team: "platform"
+        
+        # OTEL collector
+        - type: "otel"
+          config:
+            endpoint: "https://otel-collector.company.com/v1/metrics"
+            timeout: "30s"
+          insecure_tls: false
+          labels:
+            environment: "production"
+            service: "system-metrics"
+        
+        # CSV backup
+        - type: "csv"
+          config:
+            path: "/var/log/elasticetl/csv/production-metrics"
+        
+        # Debug stream for troubleshooting
+        - type: "debug"
+          config:
+            path: "/var/log/elasticetl/debug/production"
+            format: "prometheus"
+
+  - name: "application-logs"
+    enabled: true
+    interval: "60s"
+    
+    extract:
+      elasticsearch_query: |
+        {
+          "query": {
+            "bool": {
+              "must": [
+                {
+                  "range": {
+                    "@timestamp": {
+                      "gte": "now-2m"
+                    }
+                  }
+                },
+                {
+                  "term": {
+                    "service.name": "web-api"
+                  }
+                }
+              ]
+            }
+          },
+          "aggs": {
+            "error_count": {
+              "filter": {
+                "term": {
+                  "log.level": "ERROR"
+                }
+              }
+            },
+            "warning_count": {
+              "filter": {
+                "term": {
+                  "log.level": "WARN"
+                }
+              }
+            },
+            "total_requests": {
+              "value_count": {
+                "field": "request_id"
+              }
+            }
+          }
+        }
+      urls:
+        - "https://elasticsearch-logs.company.com:9200/app-logs-*/_search"
+      cluster_names:
+        - "logs-cluster"
+      auth_headers:
+        - "Basic ${LOGS_AUTH_TOKEN}"
+      json_path: "aggregations"
+      timeout: "30s"
+      max_retries: 2
+      insecure_tls: false
+    
+    transform:
+      stateless: true
+      substitute_zeros_for_null: true
+      previous_results_sets: 0
+      output_format: "json"
+      conversion_functions:
+        - field: ".*_count\\.doc_count"
+          function: "convert_type"
+          to_type: "int64"
+        - field: "total_requests\\.value"
+          function: "convert_type"
+          to_type: "int64"
+    
+    load:
+      streams:
+        - type: "prometheus"
+          config:
+            endpoint: "https://prometheus.company.com/api/v1/write"
+            timeout: "30s"
+          basic_auth:
+            username: "${PROMETHEUS_USER}"
+            password: "${PROMETHEUS_PASS}"
+          labels:
+            environment: "production"
+            service: "application-logs"
+            application: "web-api"
+
+global:
+  resource_limits:
+    max_memory_mb: 1024
+    max_cpu_percent: 70
+    max_goroutines: 200
+    max_connections: 100
+  
+  metrics:
+    enabled: true
+    port: 8080
+    path: "/metrics"
+    interval: "15s"
+  
+  logging:
+    level: "info"
+    format: "json"
+    output: "file"
+    file: "/var/log/elasticetl/application.log"

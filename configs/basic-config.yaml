@@ -1,0 +1,86 @@
+# Basic ElasticETL Configuration
+# This configuration demonstrates a simple ETL pipeline with supported features
+
+pipelines:
+  - name: "basic-metrics"
+    enabled: true
+    interval: "60s"
+    
+    extract:
+      elasticsearch_query: |
+        {
+          "query": {
+            "range": {
+              "@timestamp": {
+                "gte": "now-5m"
+              }
+            }
+          },
+          "aggs": {
+            "avg_response_time": {
+              "avg": {
+                "field": "response_time"
+              }
+            },
+            "total_requests": {
+              "value_count": {
+                "field": "request_id"
+              }
+            }
+          }
+        }
+      urls:
+        - "http://localhost:9200/logs-*/_search"
+      cluster_names:
+        - "development"
+      json_path: "aggregations"
+      timeout: "30s"
+      max_retries: 3
+      insecure_tls: false
+    
+    transform:
+      stateless: true
+      substitute_zeros_for_null: true
+      previous_results_sets: 0
+      output_format: "json"
+      conversion_functions:
+        - field: "avg_response_time.value"
+          function: "convert_type"
+          to_type: "float64"
+        - field: "total_requests.value"
+          function: "convert_type"
+          to_type: "int64"
+    
+    load:
+      streams:
+        - type: "prometheus"
+          config:
+            endpoint: "http://localhost:9091/metrics/job/elasticetl"
+            timeout: "30s"
+          insecure_tls: false
+          labels:
+            environment: "development"
+            service: "basic-metrics"
+        
+        - type: "debug"
+          config:
+            path: "/tmp/elasticetl/debug/basic"
+            format: "json"
+
+global:
+  resource_limits:
+    max_memory_mb: 256
+    max_cpu_percent: 50
+    max_goroutines: 50
+    max_connections: 25
+  
+  metrics:
+    enabled: true
+    port: 8080
+    path: "/metrics"
+    interval: "30s"
+  
+  logging:
+    level: "info"
+    format: "json"
+    output: "stdout"

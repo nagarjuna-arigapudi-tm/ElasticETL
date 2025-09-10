@@ -345,20 +345,21 @@ func (g *GEMStream) createPrometheusTimeSeriesForMetric(csvData [][]string, metr
 	uniqueGroups := make(map[string][]map[string]interface{})
 
 	for _, row := range csvData {
-		if len(row) <= metric.Value || len(row) <= metric.Timestamp {
+		// Check bounds for required columns
+		if metric.Value >= len(row) || metric.Timestamp >= len(row) {
 			continue // Skip rows that don't have required columns
 		}
 
-		// Create unique key from uniqueFieldsIndex
+		// Create unique key from uniqueFieldsIndex with bounds checking
 		var keyParts []string
 		for _, idx := range metric.UniqueFieldsIndex {
-			if idx < len(row) {
+			if idx >= 0 && idx < len(row) {
 				keyParts = append(keyParts, row[idx])
 			}
 		}
 		uniqueKey := strings.Join(keyParts, "|")
 
-		// Parse value and timestamp
+		// Parse value and timestamp with bounds checking
 		value, ok := g.parseFloat(row[metric.Value])
 		if !ok {
 			continue
@@ -393,11 +394,11 @@ func (g *GEMStream) createPrometheusTimeSeriesForMetric(csvData [][]string, metr
 			"__name__": metric.Name,
 		}
 
-		// Add dynamic labels
+		// Add dynamic labels with bounds checking
 		for _, label := range metric.Labels {
 			if label.StaticValue != "" {
 				labels[label.LabelName] = label.StaticValue
-			} else if label.IndexInCSVData < len(row) {
+			} else if label.IndexInCSVData >= 0 && label.IndexInCSVData < len(row) {
 				labels[label.LabelName] = row[label.IndexInCSVData]
 			}
 		}
@@ -806,8 +807,9 @@ func (p *PrometheusStream) GetType() string {
 
 // DebugStream handles loading to debug files
 type DebugStream struct {
-	path   string
-	format string // "json", "prometheus", "otel"
+	path    string
+	format  string // "json", "prometheus", "otel"
+	metrics []config.PrometheusMetricConfig
 }
 
 // NewDebugStream creates a new debug stream
@@ -823,8 +825,9 @@ func NewDebugStream(config map[string]interface{}, metrics []config.PrometheusMe
 	}
 
 	return &DebugStream{
-		path:   path,
-		format: format,
+		path:    path,
+		format:  format,
+		metrics: metrics,
 	}, nil
 }
 
@@ -900,16 +903,15 @@ func (d *DebugStream) generatePrometheusFormat(results []*transform.TransformedR
 			continue
 		}
 
-		// Parse metrics configuration from result metadata if available
-		metricsConfig := d.parseMetricsConfig(result)
-		if len(metricsConfig) == 0 {
+		// Get metrics configuration from loader config (passed during stream creation)
+		if len(d.metrics) == 0 {
 			// Fallback to old behavior if no metrics config
 			d.generateFallbackPrometheusFormat(result, &lines)
 			continue
 		}
 
-		// Generate time series for each metric
-		for _, metric := range metricsConfig {
+		// Generate time series for each metric using loader's metrics configuration
+		for _, metric := range d.metrics {
 			timeSeries := d.createTimeSeriesForMetric(result.CSVData, metric)
 			for _, ts := range timeSeries {
 				lines = append(lines, ts)
@@ -991,20 +993,21 @@ func (d *DebugStream) createTimeSeriesForMetric(csvData [][]string, metric confi
 	uniqueGroups := make(map[string][]map[string]interface{})
 
 	for _, row := range csvData {
-		if len(row) <= metric.Value || len(row) <= metric.Timestamp {
+		// Check bounds for required columns
+		if metric.Value >= len(row) || metric.Timestamp >= len(row) {
 			continue // Skip rows that don't have required columns
 		}
 
-		// Create unique key from uniqueFieldsIndex
+		// Create unique key from uniqueFieldsIndex with bounds checking
 		var keyParts []string
 		for _, idx := range metric.UniqueFieldsIndex {
-			if idx < len(row) {
+			if idx >= 0 && idx < len(row) {
 				keyParts = append(keyParts, row[idx])
 			}
 		}
 		uniqueKey := strings.Join(keyParts, "|")
 
-		// Parse value and timestamp
+		// Parse value and timestamp with bounds checking
 		value, ok := d.parseFloat(row[metric.Value])
 		if !ok {
 			continue
@@ -1038,11 +1041,11 @@ func (d *DebugStream) createTimeSeriesForMetric(csvData [][]string, metric confi
 		var labelPairs []string
 		labelPairs = append(labelPairs, fmt.Sprintf(`__name__="%s"`, metric.Name))
 
-		// Add dynamic labels
+		// Add dynamic labels with bounds checking
 		for _, label := range metric.Labels {
 			if label.StaticValue != "" {
 				labelPairs = append(labelPairs, fmt.Sprintf(`%s="%s"`, label.LabelName, label.StaticValue))
-			} else if label.IndexInCSVData < len(row) {
+			} else if label.IndexInCSVData >= 0 && label.IndexInCSVData < len(row) {
 				labelPairs = append(labelPairs, fmt.Sprintf(`%s="%s"`, label.LabelName, row[label.IndexInCSVData]))
 			}
 		}

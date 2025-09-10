@@ -439,8 +439,8 @@ func (g *GEMStream) parseFloat(s string) (float64, bool) {
 
 // parseInt64 parses a string to int64 for GEM stream
 func (g *GEMStream) parseInt64(s string) (int64, bool) {
-	if i, err := strconv.ParseInt(s, 10, 64); err == nil {
-		return i, true
+	if f, err := strconv.ParseFloat(s, 64); err == nil {
+		return int64(f), true
 	}
 	return 0, false
 }
@@ -1100,8 +1100,8 @@ func (d *DebugStream) parseFloat(s string) (float64, bool) {
 
 // parseInt64 parses a string to int64
 func (d *DebugStream) parseInt64(s string) (int64, bool) {
-	if i, err := strconv.ParseInt(s, 10, 64); err == nil {
-		return i, true
+	if f, err := strconv.ParseFloat(s, 64); err == nil {
+		return int64(f), true
 	}
 	return 0, false
 }

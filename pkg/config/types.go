@@ -65,8 +65,10 @@ type ConversionFunctionConfig struct {
 
 // LoadConfig contains load configuration
 type LoadConfig struct {
-	Streams      []StreamConfig `json:"streams" yaml:"streams"`
-	LabelColumns []string       `json:"label_columns,omitempty" yaml:"label_columns,omitempty"` // Columns to use as labels
+	Input        string                   `json:"input" yaml:"input"`                         // Input data type: "csv_data", "transformed_data"
+	Metrics      []PrometheusMetricConfig `json:"metrics,omitempty" yaml:"metrics,omitempty"` // Metrics configuration for all streams
+	Streams      []StreamConfig           `json:"streams" yaml:"streams"`
+	LabelColumns []string                 `json:"label_columns,omitempty" yaml:"label_columns,omitempty"` // Columns to use as labels
 }
 
 // StreamConfig defines a single load stream

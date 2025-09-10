@@ -92,7 +92,7 @@ func NewLoader(cfg config.LoadConfig) (*Loader, error) {
 
 	// Initialize streams
 	for _, streamCfg := range cfg.Streams {
-		stream, err := createStream(streamCfg)
+		stream, err := createStream(streamCfg, cfg.Metrics)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create stream %s: %w", streamCfg.Type, err)
 		}
@@ -174,7 +174,7 @@ func (l *Loader) UpdateConfig(cfg config.LoadConfig) error {
 	// Create new streams
 	l.streams = nil
 	for _, streamCfg := range cfg.Streams {
-		stream, err := createStream(streamCfg)
+		stream, err := createStream(streamCfg, cfg.Metrics)
 		if err != nil {
 			return fmt.Errorf("failed to create stream %s: %w", streamCfg.Type, err)
 		}
@@ -186,16 +186,16 @@ func (l *Loader) UpdateConfig(cfg config.LoadConfig) error {
 }
 
 // createStream creates a stream based on configuration
-func createStream(cfg config.StreamConfig) (Stream, error) {
+func createStream(cfg config.StreamConfig, metrics []config.PrometheusMetricConfig) (Stream, error) {
 	switch cfg.Type {
 	case "gem":
-		return NewGEMStream(cfg.Config, cfg.Labels, cfg.InsecureTLS)
+		return NewGEMStream(cfg.Config, cfg.Labels, cfg.InsecureTLS, metrics)
 	case "otel":
-		return NewOTELStream(cfg.Config, cfg.Labels, cfg.InsecureTLS)
+		return NewOTELStream(cfg.Config, cfg.Labels, cfg.InsecureTLS, metrics)
 	case "prometheus":
-		return NewPrometheusStream(cfg.Config, cfg.Labels, cfg.InsecureTLS)
+		return NewPrometheusStream(cfg.Config, cfg.Labels, cfg.InsecureTLS, metrics)
 	case "debug":
-		return NewDebugStream(cfg.Config)
+		return NewDebugStream(cfg.Config, metrics)
 	case "csv":
 		return NewCSVStream(cfg.Config)
 	default:
@@ -208,10 +208,11 @@ type GEMStream struct {
 	endpoint   string
 	httpClient *http.Client
 	labels     map[string]string
+	metrics    []config.PrometheusMetricConfig
 }
 
 // NewGEMStream creates a new GEM stream
-func NewGEMStream(config map[string]interface{}, labels map[string]string, insecureTLS bool) (*GEMStream, error) {
+func NewGEMStream(config map[string]interface{}, labels map[string]string, insecureTLS bool, metrics []config.PrometheusMetricConfig) (*GEMStream, error) {
 	endpoint, ok := config["endpoint"].(string)
 	if !ok {
 		return nil, fmt.Errorf("gem stream requires 'endpoint' configuration")
@@ -235,6 +236,7 @@ func NewGEMStream(config map[string]interface{}, labels map[string]string, insec
 	return &GEMStream{
 		endpoint: endpoint,
 		labels:   labels,
+		metrics:  metrics,
 		httpClient: &http.Client{
 			Timeout:   timeout,
 			Transport: transport,
@@ -287,18 +289,14 @@ func (g *GEMStream) convertToPrometheusSamples(results []*transform.TransformedR
 	var samples []map[string]interface{}
 
 	for _, result := range results {
-		// Use CSV data to create time series if available
-		if len(result.CSVData) > 0 {
-			// Parse metrics configuration from result metadata if available
-			metricsConfig := g.parseMetricsConfig(result)
-			if len(metricsConfig) > 0 {
-				// Generate time series for each metric using CSV data
-				for _, metric := range metricsConfig {
-					metricSamples := g.createPrometheusTimeSeriesForMetric(result.CSVData, metric)
-					samples = append(samples, metricSamples...)
-				}
-				continue
+		// Use CSV data to create time series if available and metrics are configured
+		if len(result.CSVData) > 0 && len(g.metrics) > 0 {
+			// Generate time series for each metric using CSV data
+			for _, metric := range g.metrics {
+				metricSamples := g.createPrometheusTimeSeriesForMetric(result.CSVData, metric)
+				samples = append(samples, metricSamples...)
 			}
+			continue
 		}
 
 		// Fallback to old behavior using TransformedData
@@ -337,68 +335,6 @@ func (g *GEMStream) convertToPrometheusSamples(results []*transform.TransformedR
 	}
 
 	return samples
-}
-
-// parseMetricsConfig extracts metrics configuration from result metadata for GEM stream
-func (g *GEMStream) parseMetricsConfig(result *transform.TransformedResult) []config.PrometheusMetricConfig {
-	var metrics []config.PrometheusMetricConfig
-
-	// Try to get metrics config from metadata
-	if metricsRaw, ok := result.Metadata["metrics"]; ok {
-		if metricsList, ok := metricsRaw.([]interface{}); ok {
-			for _, metricRaw := range metricsList {
-				if metricMap, ok := metricRaw.(map[string]interface{}); ok {
-					var metric config.PrometheusMetricConfig
-
-					if name, ok := metricMap["name"].(string); ok {
-						metric.Name = name
-					}
-
-					if value, ok := metricMap["value"].(int); ok {
-						metric.Value = value
-					}
-
-					if timestamp, ok := metricMap["timestamp"].(int); ok {
-						metric.Timestamp = timestamp
-					}
-
-					if uniqueFields, ok := metricMap["uniquefieldsIndex"].([]interface{}); ok {
-						for _, field := range uniqueFields {
-							if idx, ok := field.(int); ok {
-								metric.UniqueFieldsIndex = append(metric.UniqueFieldsIndex, idx)
-							}
-						}
-					}
-
-					if labelsRaw, ok := metricMap["labels"].([]interface{}); ok {
-						for _, labelRaw := range labelsRaw {
-							if labelMap, ok := labelRaw.(map[string]interface{}); ok {
-								var label config.PrometheusLabelConfig
-
-								if labelName, ok := labelMap["label_name"].(string); ok {
-									label.LabelName = labelName
-								}
-
-								if indexInCSV, ok := labelMap["index_in_csv_data"].(int); ok {
-									label.IndexInCSVData = indexInCSV
-								}
-
-								if staticValue, ok := labelMap["static_value"].(string); ok {
-									label.StaticValue = staticValue
-								}
-
-								metric.Labels = append(metric.Labels, label)
-							}
-						}
-					}
-
-					metrics = append(metrics, metric)
-				}
-			}
-		}
-	}
-
-	return metrics
 }
 
 // createPrometheusTimeSeriesForMetric creates Prometheus remote write time series for a specific metric
@@ -540,7 +476,7 @@ type OTELStream struct {
 }
 
 // NewOTELStream creates a new OTEL stream
-func NewOTELStream(config map[string]interface{}, labels map[string]string, insecureTLS bool) (*OTELStream, error) {
+func NewOTELStream(config map[string]interface{}, labels map[string]string, insecureTLS bool, metrics []config.PrometheusMetricConfig) (*OTELStream, error) {
 	endpoint, ok := config["endpoint"].(string)
 	if !ok {
 		return nil, fmt.Errorf("otel stream requires 'endpoint' configuration")
@@ -698,7 +634,7 @@ type PrometheusStream struct {
 }
 
 // NewPrometheusStream creates a new Prometheus stream
-func NewPrometheusStream(config map[string]interface{}, labels map[string]string, insecureTLS bool) (*PrometheusStream, error) {
+func NewPrometheusStream(config map[string]interface{}, labels map[string]string, insecureTLS bool, metrics []config.PrometheusMetricConfig) (*PrometheusStream, error) {
 	// Support both old endpoint format and new remote_write_url format
 	var endpoint string
 	if ep, ok := config["endpoint"].(string); ok {
@@ -875,7 +811,7 @@ type DebugStream struct {
 }
 
 // NewDebugStream creates a new debug stream
-func NewDebugStream(config map[string]interface{}) (*DebugStream, error) {
+func NewDebugStream(config map[string]interface{}, metrics []config.PrometheusMetricConfig) (*DebugStream, error) {
 	path, ok := config["path"].(string)
 	if !ok {
 		return nil, fmt.Errorf("debug stream requires 'path' configuration")

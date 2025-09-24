@@ -52,22 +52,78 @@ func parseBasicAuth(config map[string]interface{}) (string, error) {
 		return "", nil // No basic auth configured
 	}
 
-	basicAuthMap, ok := basicAuthRaw.(map[string]interface{})
+	// Use safe map conversion to handle both JSON and YAML parsing
+	basicAuthMap, ok := safeMapStringInterface(basicAuthRaw)
 	if !ok {
 		return "", fmt.Errorf("basic_auth must be an object")
 	}
 
-	username, ok := basicAuthMap["username"].(string)
+	// Use safe string conversion to handle both JSON and YAML parsing
+	username, ok := safeString(basicAuthMap["username"])
 	if !ok {
 		return "", fmt.Errorf("basic_auth.username is required")
 	}
 
-	password, ok := basicAuthMap["password"].(string)
+	password, ok := safeString(basicAuthMap["password"])
 	if !ok {
 		return "", fmt.Errorf("basic_auth.password is required")
 	}
 
 	return createBasicAuthHeader(username, password), nil
+}
+
+// safeString safely converts a value to string, handling both JSON and YAML parsing
+func safeString(value interface{}) (string, bool) {
+	if value == nil {
+		return "", false
+	}
+
+	switch v := value.(type) {
+	case string:
+		return v, true
+	case int:
+		return fmt.Sprintf("%d", v), true
+	case int64:
+		return fmt.Sprintf("%d", v), true
+	case float64:
+		// Check if it's actually an integer value
+		if v == float64(int64(v)) {
+			return fmt.Sprintf("%d", int64(v)), true
+		}
+		return fmt.Sprintf("%g", v), true
+	case float32:
+		if v == float32(int32(v)) {
+			return fmt.Sprintf("%d", int32(v)), true
+		}
+		return fmt.Sprintf("%g", v), true
+	case bool:
+		return fmt.Sprintf("%t", v), true
+	default:
+		return fmt.Sprintf("%v", v), true
+	}
+}
+
+// safeMapStringInterface safely converts a value to map[string]interface{}, handling both JSON and YAML parsing
+func safeMapStringInterface(value interface{}) (map[string]interface{}, bool) {
+	if value == nil {
+		return nil, false
+	}
+
+	switch v := value.(type) {
+	case map[string]interface{}:
+		return v, true
+	case map[interface{}]interface{}:
+		// YAML sometimes parses maps as map[interface{}]interface{}
+		result := make(map[string]interface{})
+		for key, val := range v {
+			if strKey, ok := safeString(key); ok {
+				result[strKey] = val
+			}
+		}
+		return result, true
+	default:
+		return nil, false
+	}
 }
 
 // Loader handles data loading to various destinations
@@ -213,13 +269,13 @@ type GEMStream struct {
 
 // NewGEMStream creates a new GEM stream
 func NewGEMStream(config map[string]interface{}, labels map[string]string, insecureTLS bool, metrics []config.PrometheusMetricConfig) (*GEMStream, error) {
-	endpoint, ok := config["endpoint"].(string)
+	endpoint, ok := safeString(config["endpoint"])
 	if !ok {
 		return nil, fmt.Errorf("gem stream requires 'endpoint' configuration")
 	}
 
 	timeout := 30 * time.Second
-	if t, ok := config["timeout"].(string); ok {
+	if t, ok := safeString(config["timeout"]); ok {
 		if parsed, err := time.ParseDuration(t); err == nil {
 			timeout = parsed
 		}
@@ -311,7 +367,7 @@ func (g *GEMStream) convertToPrometheusSamples(results []*transform.TransformedR
 				}
 
 				// Add cluster name from metadata if available
-				if clusterName, ok := result.Metadata["cluster_name"].(string); ok && clusterName != "" {
+				if clusterName, ok := safeString(result.Metadata["cluster_name"]); ok && clusterName != "" {
 					labels["cluster"] = clusterName
 				}
 
@@ -478,13 +534,13 @@ type OTELStream struct {
 
 // NewOTELStream creates a new OTEL stream
 func NewOTELStream(config map[string]interface{}, labels map[string]string, insecureTLS bool, metrics []config.PrometheusMetricConfig) (*OTELStream, error) {
-	endpoint, ok := config["endpoint"].(string)
+	endpoint, ok := safeString(config["endpoint"])
 	if !ok {
 		return nil, fmt.Errorf("otel stream requires 'endpoint' configuration")
 	}
 
 	timeout := 30 * time.Second
-	if t, ok := config["timeout"].(string); ok {
+	if t, ok := safeString(config["timeout"]); ok {
 		if parsed, err := time.ParseDuration(t); err == nil {
 			timeout = parsed
 		}
@@ -550,7 +606,7 @@ func (o *OTELStream) convertToOTELFormat(results []*transform.TransformedResult)
 		}
 
 		// Add cluster name from metadata if available
-		if clusterName, ok := result.Metadata["cluster_name"].(string); ok && clusterName != "" {
+		if clusterName, ok := safeString(result.Metadata["cluster_name"]); ok && clusterName != "" {
 			attributes["cluster"] = clusterName
 		}
 
@@ -638,16 +694,16 @@ type PrometheusStream struct {
 func NewPrometheusStream(config map[string]interface{}, labels map[string]string, insecureTLS bool, metrics []config.PrometheusMetricConfig) (*PrometheusStream, error) {
 	// Support both old endpoint format and new remote_write_url format
 	var endpoint string
-	if ep, ok := config["endpoint"].(string); ok {
+	if ep, ok := safeString(config["endpoint"]); ok {
 		endpoint = ep
-	} else if rwUrl, ok := config["remote_write_url"].(string); ok {
+	} else if rwUrl, ok := safeString(config["remote_write_url"]); ok {
 		endpoint = rwUrl
 	} else {
 		return nil, fmt.Errorf("prometheus stream requires 'endpoint' or 'remote_write_url' configuration")
 	}
 
 	timeout := 30 * time.Second
-	if t, ok := config["timeout"].(string); ok {
+	if t, ok := safeString(config["timeout"]); ok {
 		if parsed, err := time.ParseDuration(t); err == nil {
 			timeout = parsed
 		}
@@ -674,15 +730,15 @@ func NewPrometheusStream(config map[string]interface{}, labels map[string]string
 	if dynamicLabelsRaw, ok := config["dynamic_labels"]; ok {
 		if dynamicLabelsSlice, ok := dynamicLabelsRaw.([]interface{}); ok {
 			for _, labelRaw := range dynamicLabelsSlice {
-				if labelMap, ok := labelRaw.(map[string]interface{}); ok {
+				if labelMap, ok := safeMapStringInterface(labelRaw); ok {
 					var labelConfig DynamicLabelConfig
-					if labelName, ok := labelMap["label_name"].(string); ok {
+					if labelName, ok := safeString(labelMap["label_name"]); ok {
 						labelConfig.LabelName = labelName
 					}
-					if csvColumn, ok := labelMap["csv_column"].(string); ok {
+					if csvColumn, ok := safeString(labelMap["csv_column"]); ok {
 						labelConfig.CSVColumn = csvColumn
 					}
-					if staticValue, ok := labelMap["static_value"].(string); ok {
+					if staticValue, ok := safeString(labelMap["static_value"]); ok {
 						labelConfig.StaticValue = staticValue
 					}
 					stream.dynamicLabels = append(stream.dynamicLabels, labelConfig)
@@ -695,12 +751,12 @@ func NewPrometheusStream(config map[string]interface{}, labels map[string]string
 	if metricColumnsRaw, ok := config["metric_columns"]; ok {
 		if metricColumnsSlice, ok := metricColumnsRaw.([]interface{}); ok {
 			for _, metricRaw := range metricColumnsSlice {
-				if metricMap, ok := metricRaw.(map[string]interface{}); ok {
+				if metricMap, ok := safeMapStringInterface(metricRaw); ok {
 					var metricConfig MetricColumnConfig
-					if column, ok := metricMap["column"].(string); ok {
+					if column, ok := safeString(metricMap["column"]); ok {
 						metricConfig.Column = column
 					}
-					if metricName, ok := metricMap["metric_name"].(string); ok {
+					if metricName, ok := safeString(metricMap["metric_name"]); ok {
 						metricConfig.MetricName = metricName
 					}
 					stream.metricColumns = append(stream.metricColumns, metricConfig)
@@ -761,7 +817,7 @@ func (p *PrometheusStream) convertToPrometheusFormat(results []*transform.Transf
 				labelPairs := []string{fmt.Sprintf(`source="%s"`, result.Source)}
 
 				// Add cluster name from metadata if available
-				if clusterName, ok := result.Metadata["cluster_name"].(string); ok && clusterName != "" {
+				if clusterName, ok := safeString(result.Metadata["cluster_name"]); ok && clusterName != "" {
 					labelPairs = append(labelPairs, fmt.Sprintf(`cluster="%s"`, clusterName))
 				}
 
@@ -814,13 +870,13 @@ type DebugStream struct {
 
 // NewDebugStream creates a new debug stream
 func NewDebugStream(config map[string]interface{}, metrics []config.PrometheusMetricConfig) (*DebugStream, error) {
-	path, ok := config["path"].(string)
+	path, ok := safeString(config["path"])
 	if !ok {
 		return nil, fmt.Errorf("debug stream requires 'path' configuration")
 	}
 
 	format := "json" // default format
-	if f, ok := config["format"].(string); ok {
+	if f, ok := safeString(config["format"]); ok {
 		format = f
 	}
 
@@ -1078,7 +1134,7 @@ func (d *DebugStream) generateFallbackPrometheusFormat(result *transform.Transfo
 			labelPairs := []string{fmt.Sprintf(`source="%s"`, result.Source)}
 
 			// Add cluster name from metadata if available
-			if clusterName, ok := result.Metadata["cluster_name"].(string); ok && clusterName != "" {
+			if clusterName, ok := safeString(result.Metadata["cluster_name"]); ok && clusterName != "" {
 				labelPairs = append(labelPairs, fmt.Sprintf(`cluster="%s"`, clusterName))
 			}
 
@@ -1117,7 +1173,7 @@ func (d *DebugStream) generateOTELFormat(results []*transform.TransformedResult)
 		}
 
 		// Add cluster name from metadata if available
-		if clusterName, ok := result.Metadata["cluster_name"].(string); ok && clusterName != "" {
+		if clusterName, ok := safeString(result.Metadata["cluster_name"]); ok && clusterName != "" {
 			attributes["cluster"] = clusterName
 		}
 
@@ -1200,7 +1256,7 @@ type CSVStream struct {
 
 // NewCSVStream creates a new CSV stream
 func NewCSVStream(config map[string]interface{}) (*CSVStream, error) {
-	path, ok := config["path"].(string)
+	path, ok := safeString(config["path"])
 	if !ok {
 		return nil, fmt.Errorf("csv stream requires 'path' configuration")
 	}

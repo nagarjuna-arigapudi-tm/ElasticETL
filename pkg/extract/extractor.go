@@ -167,7 +167,7 @@ func (e *Extractor) extractFromEndpoint(ctx context.Context, index int) (*Result
 	}
 
 	// Prepare Elasticsearch query - use raw query string directly
-	req, err := http.NewRequestWithContext(ctx, "POST", url+"/_search", bytes.NewBufferString(processedQuery))
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBufferString(processedQuery))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}

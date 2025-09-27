@@ -19,6 +19,9 @@ import (
 
 	"elasticetl/pkg/config"
 	"elasticetl/pkg/transform"
+
+	"github.com/golang/snappy"
+	"github.com/prometheus/prometheus/prompb"
 )
 
 // substituteEnvVars replaces environment variables in the format ${VAR_NAME}
@@ -250,6 +253,8 @@ func createStream(cfg config.StreamConfig, metrics []config.PrometheusMetricConf
 		return NewOTELStream(cfg.Config, cfg.Labels, cfg.InsecureTLS, metrics)
 	case "prometheus":
 		return NewPrometheusStream(cfg.Config, cfg.Labels, cfg.InsecureTLS, metrics)
+	case "prometheus_remote_write":
+		return NewPrometheusRemoteWriteStream(cfg.Config, cfg.Labels, cfg.InsecureTLS, metrics)
 	case "debug":
 		return NewDebugStream(cfg.Config, metrics)
 	case "csv":
@@ -811,6 +816,15 @@ func (p *PrometheusStream) convertToPrometheusFormat(results []*transform.Transf
 	var lines []string
 
 	for _, result := range results {
+		// Use CSV data to create time series if available and metric columns are configured
+		if len(result.CSVData) > 0 && len(p.metricColumns) > 0 {
+			// Generate time series using CSV data and metric columns configuration
+			prometheusLines := p.createPrometheusLinesFromCSV(result.CSVData, result.CSVHeaders, result.Source, result.Timestamp.UnixMilli())
+			lines = append(lines, prometheusLines...)
+			continue
+		}
+
+		// Fallback to old behavior using TransformedData
 		for key, value := range result.TransformedData {
 			if numValue, ok := p.toFloat64(value); ok {
 				// Build labels string
@@ -826,15 +840,79 @@ func (p *PrometheusStream) convertToPrometheusFormat(results []*transform.Transf
 					labelPairs = append(labelPairs, fmt.Sprintf(`%s="%s"`, labelKey, labelValue))
 				}
 
-				labelsStr := fmt.Sprintf("{%s}", fmt.Sprintf("%s", labelPairs))
-				line := fmt.Sprintf(`%s%s %f %d`,
+				labelsStr := strings.Join(labelPairs, ",")
+				line := fmt.Sprintf(`%s{%s} %f %d`,
 					key, labelsStr, numValue, result.Timestamp.UnixMilli())
 				lines = append(lines, line)
 			}
 		}
 	}
 
-	return fmt.Sprintf("%s\n", fmt.Sprintf("%s", lines))
+	return strings.Join(lines, "\n") + "\n"
+}
+
+// createPrometheusLinesFromCSV creates Prometheus exposition format lines from CSV data
+func (p *PrometheusStream) createPrometheusLinesFromCSV(csvData [][]string, csvHeaders []string, source string, timestamp int64) []string {
+	var lines []string
+
+	// Create a map of header names to column indices for easier lookup
+	headerMap := make(map[string]int)
+	for i, header := range csvHeaders {
+		headerMap[header] = i
+	}
+
+	// Process each configured metric column
+	for _, metricConfig := range p.metricColumns {
+		// Find the column index for this metric
+		columnIndex, exists := headerMap[metricConfig.Column]
+		if !exists {
+			continue // Skip if column doesn't exist
+		}
+
+		// Process each row of CSV data
+		for _, row := range csvData {
+			if columnIndex >= len(row) {
+				continue // Skip if row doesn't have this column
+			}
+
+			// Parse the metric value
+			if numValue, ok := p.parseFloat(row[columnIndex]); ok {
+				// Build labels string
+				labelPairs := []string{fmt.Sprintf(`source="%s"`, source)}
+
+				// Add dynamic labels from CSV columns
+				for _, labelConfig := range p.dynamicLabels {
+					if labelConfig.StaticValue != "" {
+						labelPairs = append(labelPairs, fmt.Sprintf(`%s="%s"`, labelConfig.LabelName, labelConfig.StaticValue))
+					} else if labelConfig.CSVColumn != "" {
+						if labelColumnIndex, exists := headerMap[labelConfig.CSVColumn]; exists && labelColumnIndex < len(row) {
+							labelPairs = append(labelPairs, fmt.Sprintf(`%s="%s"`, labelConfig.LabelName, row[labelColumnIndex]))
+						}
+					}
+				}
+
+				// Add configured static labels
+				for labelKey, labelValue := range p.labels {
+					labelPairs = append(labelPairs, fmt.Sprintf(`%s="%s"`, labelKey, labelValue))
+				}
+
+				labelsStr := strings.Join(labelPairs, ",")
+				line := fmt.Sprintf(`%s{%s} %f %d`,
+					metricConfig.MetricName, labelsStr, numValue, timestamp)
+				lines = append(lines, line)
+			}
+		}
+	}
+
+	return lines
+}
+
+// parseFloat parses a string to float64 for Prometheus stream
+func (p *PrometheusStream) parseFloat(s string) (float64, bool) {
+	if f, err := strconv.ParseFloat(s, 64); err == nil {
+		return f, true
+	}
+	return 0, false
 }
 
 // toFloat64 converts a value to float64 if possible
@@ -1324,4 +1402,300 @@ func (c *CSVStream) Close() error {
 // GetType returns the stream type
 func (c *CSVStream) GetType() string {
 	return "csv"
+}
+
+// PrometheusRemoteWriteStream handles loading to Prometheus using remote write protocol
+type PrometheusRemoteWriteStream struct {
+	endpoint   string
+	httpClient *http.Client
+	labels     map[string]string
+	metrics    []config.PrometheusMetricConfig
+	basicAuth  string
+}
+
+// NewPrometheusRemoteWriteStream creates a new Prometheus remote write stream
+func NewPrometheusRemoteWriteStream(config map[string]interface{}, labels map[string]string, insecureTLS bool, metrics []config.PrometheusMetricConfig) (*PrometheusRemoteWriteStream, error) {
+	endpoint, ok := safeString(config["remote_write_url"])
+	if !ok {
+		if ep, ok := safeString(config["endpoint"]); ok {
+			endpoint = ep
+		} else {
+			return nil, fmt.Errorf("prometheus remote write stream requires 'remote_write_url' or 'endpoint' configuration")
+		}
+	}
+
+	timeout := 30 * time.Second
+	if t, ok := safeString(config["timeout"]); ok {
+		if parsed, err := time.ParseDuration(t); err == nil {
+			timeout = parsed
+		}
+	}
+
+	// Configure HTTP client with TLS settings
+	transport := &http.Transport{}
+	if insecureTLS {
+		transport.TLSClientConfig = &tls.Config{
+			InsecureSkipVerify: true,
+		}
+	}
+
+	stream := &PrometheusRemoteWriteStream{
+		endpoint: endpoint,
+		labels:   labels,
+		metrics:  metrics,
+		httpClient: &http.Client{
+			Timeout:   timeout,
+			Transport: transport,
+		},
+	}
+
+	// Parse basic auth configuration
+	basicAuth, err := parseBasicAuth(config)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse basic auth: %w", err)
+	}
+	stream.basicAuth = basicAuth
+
+	return stream, nil
+}
+
+// Load loads data to Prometheus using remote write protocol
+func (p *PrometheusRemoteWriteStream) Load(ctx context.Context, results []*transform.TransformedResult) error {
+	if len(results) == 0 {
+		return nil
+	}
+
+	// Convert results to Prometheus remote write format
+	timeSeries := p.convertToPrometheusTimeSeries(results)
+	if len(timeSeries) == 0 {
+		return nil
+	}
+
+	// Create WriteRequest
+	writeRequest := &prompb.WriteRequest{}
+	for _, ts := range timeSeries {
+		writeRequest.Timeseries = append(writeRequest.Timeseries, *ts)
+	}
+
+	// Marshal to protobuf
+	data, err := writeRequest.Marshal()
+	if err != nil {
+		return fmt.Errorf("failed to marshal write request: %w", err)
+	}
+
+	// Compress with snappy
+	compressed := snappy.Encode(nil, data)
+
+	// Create HTTP request
+	req, err := http.NewRequestWithContext(ctx, "POST", p.endpoint, bytes.NewReader(compressed))
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+
+	// Set headers
+	req.Header.Set("Content-Type", "application/x-protobuf")
+	req.Header.Set("Content-Encoding", "snappy")
+	req.Header.Set("X-Prometheus-Remote-Write-Version", "0.1.0")
+
+	// Add basic auth header if configured
+	if p.basicAuth != "" {
+		req.Header.Set("Authorization", p.basicAuth)
+	}
+
+	// Send request
+	resp, err := p.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to send request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		return fmt.Errorf("Prometheus remote write returned status %d", resp.StatusCode)
+	}
+
+	return nil
+}
+
+// convertToPrometheusTimeSeries converts transformed results to Prometheus time series using CSV data
+func (p *PrometheusRemoteWriteStream) convertToPrometheusTimeSeries(results []*transform.TransformedResult) []*prompb.TimeSeries {
+	var timeSeries []*prompb.TimeSeries
+
+	for _, result := range results {
+		// Use CSV data to create time series if available and metrics are configured
+		if len(result.CSVData) > 0 && len(p.metrics) > 0 {
+			// Generate time series for each metric using CSV data
+			for _, metric := range p.metrics {
+				metricTimeSeries := p.createTimeSeriesForMetric(result.CSVData, metric)
+				timeSeries = append(timeSeries, metricTimeSeries...)
+			}
+			continue
+		}
+
+		// Fallback to old behavior using TransformedData
+		timestamp := result.Timestamp.UnixMilli()
+		for key, value := range result.TransformedData {
+			// Only include numeric values as metrics
+			if numValue, ok := p.toFloat64(value); ok {
+				// Create labels
+				var labels []prompb.Label
+				labels = append(labels, prompb.Label{Name: "__name__", Value: key})
+				labels = append(labels, prompb.Label{Name: "source", Value: result.Source})
+
+				// Add cluster name from metadata if available
+				if clusterName, ok := safeString(result.Metadata["cluster_name"]); ok && clusterName != "" {
+					labels = append(labels, prompb.Label{Name: "cluster", Value: clusterName})
+				}
+
+				// Add configured labels
+				for labelKey, labelValue := range p.labels {
+					labels = append(labels, prompb.Label{Name: labelKey, Value: labelValue})
+				}
+
+				// Create time series
+				ts := &prompb.TimeSeries{
+					Labels: labels,
+					Samples: []prompb.Sample{
+						{
+							Value:     numValue,
+							Timestamp: timestamp,
+						},
+					},
+				}
+				timeSeries = append(timeSeries, ts)
+			}
+		}
+	}
+
+	return timeSeries
+}
+
+// createTimeSeriesForMetric creates Prometheus remote write time series for a specific metric using CSV data
+func (p *PrometheusRemoteWriteStream) createTimeSeriesForMetric(csvData [][]string, metric config.PrometheusMetricConfig) []*prompb.TimeSeries {
+	var timeSeries []*prompb.TimeSeries
+
+	// Group CSV rows by unique field combinations
+	uniqueGroups := make(map[string][]map[string]interface{})
+
+	for _, row := range csvData {
+		// Check bounds for required columns
+		if metric.Value >= len(row) || metric.Timestamp >= len(row) {
+			continue // Skip rows that don't have required columns
+		}
+
+		// Create unique key from uniqueFieldsIndex with bounds checking
+		var keyParts []string
+		for _, idx := range metric.UniqueFieldsIndex {
+			if idx >= 0 && idx < len(row) {
+				keyParts = append(keyParts, row[idx])
+			}
+		}
+		uniqueKey := strings.Join(keyParts, "|")
+
+		// Parse value and timestamp with bounds checking
+		value, ok := p.parseFloat(row[metric.Value])
+		if !ok {
+			continue
+		}
+
+		timestamp, ok := p.parseInt64(row[metric.Timestamp])
+		if !ok {
+			continue
+		}
+
+		// Create sample
+		sample := map[string]interface{}{
+			"value":     value,
+			"timestamp": timestamp,
+			"row":       row,
+		}
+
+		uniqueGroups[uniqueKey] = append(uniqueGroups[uniqueKey], sample)
+	}
+
+	// Generate time series for each unique group
+	for _, groupSamples := range uniqueGroups {
+		if len(groupSamples) == 0 {
+			continue
+		}
+
+		// Build labels from first sample in group
+		firstSample := groupSamples[0]
+		row := firstSample["row"].([]string)
+
+		var labels []prompb.Label
+		labels = append(labels, prompb.Label{Name: "__name__", Value: metric.Name})
+
+		// Add dynamic labels with bounds checking
+		for _, label := range metric.Labels {
+			if label.StaticValue != "" {
+				labels = append(labels, prompb.Label{Name: label.LabelName, Value: label.StaticValue})
+			} else if label.IndexInCSVData >= 0 && label.IndexInCSVData < len(row) {
+				labels = append(labels, prompb.Label{Name: label.LabelName, Value: row[label.IndexInCSVData]})
+			}
+		}
+
+		// Add configured labels
+		for labelKey, labelValue := range p.labels {
+			labels = append(labels, prompb.Label{Name: labelKey, Value: labelValue})
+		}
+
+		// Create samples array for this time series
+		var samples []prompb.Sample
+		for _, sample := range groupSamples {
+			samples = append(samples, prompb.Sample{
+				Value:     sample["value"].(float64),
+				Timestamp: sample["timestamp"].(int64),
+			})
+		}
+
+		// Create time series
+		ts := &prompb.TimeSeries{
+			Labels:  labels,
+			Samples: samples,
+		}
+
+		timeSeries = append(timeSeries, ts)
+	}
+
+	return timeSeries
+}
+
+// parseFloat parses a string to float64 for Prometheus remote write stream
+func (p *PrometheusRemoteWriteStream) parseFloat(s string) (float64, bool) {
+	if f, err := strconv.ParseFloat(s, 64); err == nil {
+		return f, true
+	}
+	return 0, false
+}
+
+// parseInt64 parses a string to int64 for Prometheus remote write stream
+func (p *PrometheusRemoteWriteStream) parseInt64(s string) (int64, bool) {
+	if f, err := strconv.ParseFloat(s, 64); err == nil {
+		return int64(f), true
+	}
+	return 0, false
+}
+
+// toFloat64 converts a value to float64 if possible
+func (p *PrometheusRemoteWriteStream) toFloat64(value interface{}) (float64, bool) {
+	switch v := value.(type) {
+	case float64:
+		return v, true
+	case int:
+		return float64(v), true
+	case int64:
+		return float64(v), true
+	default:
+		return 0, false
+	}
+}
+
+// Close closes the Prometheus remote write stream
+func (p *PrometheusRemoteWriteStream) Close() error {
+	return nil
+}
+
+// GetType returns the stream type
+func (p *PrometheusRemoteWriteStream) GetType() string {
+	return "prometheus_remote_write"
 }

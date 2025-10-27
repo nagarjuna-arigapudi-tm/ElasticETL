@@ -15,15 +15,18 @@ import (
 
 // Pipeline represents a single ETL pipeline
 type Pipeline struct {
-	config      config.PipelineConfig
-	extractor   *extract.Extractor
-	transformer *transform.Transformer
-	loader      *load.Loader
-	metrics     *metrics.Collector
-	ticker      *time.Ticker
-	stopChan    chan struct{}
-	mutex       sync.RWMutex
-	running     bool
+	config          config.PipelineConfig
+	extractor       *extract.Extractor
+	transformer     *transform.Transformer
+	loader          *load.Loader
+	metrics         *metrics.Collector
+	ticker          *time.Ticker
+	retryTicker     *time.Ticker
+	stopChan        chan struct{}
+	mutex           sync.RWMutex
+	running         bool
+	failed          bool
+	lastFailureTime time.Time
 }
 
 // NewPipeline creates a new pipeline
@@ -156,6 +159,12 @@ func (p *Pipeline) run(ctx context.Context) {
 	defer func() {
 		p.mutex.Lock()
 		p.running = false
+		if p.ticker != nil {
+			p.ticker.Stop()
+		}
+		if p.retryTicker != nil {
+			p.retryTicker.Stop()
+		}
 		p.mutex.Unlock()
 	}()
 
@@ -169,7 +178,14 @@ func (p *Pipeline) run(ctx context.Context) {
 		case <-p.stopChan:
 			return
 		case <-p.ticker.C:
-			p.execute(ctx)
+			// Only execute if not in failed state or if retry interval has passed
+			p.mutex.RLock()
+			shouldExecute := !p.failed || (p.config.RetryInterval > 0 && time.Since(p.lastFailureTime) >= p.config.RetryInterval)
+			p.mutex.RUnlock()
+
+			if shouldExecute {
+				p.execute(ctx)
+			}
 		}
 	}
 }
@@ -179,17 +195,28 @@ func (p *Pipeline) execute(ctx context.Context) {
 	startTime := time.Now()
 	p.metrics.RecordPipelineStart(p.config.Name)
 
+	// Wrap execution in a recovery function to ensure pipeline isolation
+	defer func() {
+		if r := recover(); r != nil {
+			duration := time.Since(startTime)
+			p.markAsFailed()
+			p.metrics.RecordPipelineFailure(p.config.Name, duration, fmt.Errorf("pipeline panic: %v", r))
+		}
+	}()
+
 	// Extract
 	extractResults, err := p.extractor.Extract(ctx)
 	if err != nil {
 		duration := time.Since(startTime)
+		p.markAsFailed()
 		p.metrics.RecordPipelineFailure(p.config.Name, duration, fmt.Errorf("extraction failed: %w", err))
 		return
 	}
 
 	if len(extractResults) == 0 {
-		// No data extracted, but not an error
+		// No data extracted, but not an error - clear failure state
 		duration := time.Since(startTime)
+		p.markAsSuccessful()
 		p.metrics.RecordPipelineSuccess(p.config.Name, duration, 0, 0)
 		return
 	}
@@ -198,6 +225,7 @@ func (p *Pipeline) execute(ctx context.Context) {
 	transformResults, err := p.transformer.Transform(extractResults)
 	if err != nil {
 		duration := time.Since(startTime)
+		p.markAsFailed()
 		p.metrics.RecordPipelineFailure(p.config.Name, duration, fmt.Errorf("transformation failed: %w", err))
 		return
 	}
@@ -205,15 +233,17 @@ func (p *Pipeline) execute(ctx context.Context) {
 	// Load
 	if err := p.loader.Load(ctx, transformResults); err != nil {
 		duration := time.Since(startTime)
+		p.markAsFailed()
 		p.metrics.RecordPipelineFailure(p.config.Name, duration, fmt.Errorf("loading failed: %w", err))
 		return
 	}
 
-	// Calculate metrics
+	// Calculate metrics and mark as successful
 	duration := time.Since(startTime)
 	entriesProcessed := int64(len(transformResults))
 	bytesProcessed := p.calculateBytesProcessed(extractResults)
 
+	p.markAsSuccessful()
 	p.metrics.RecordPipelineSuccess(p.config.Name, duration, entriesProcessed, bytesProcessed)
 }
 
@@ -226,6 +256,35 @@ func (p *Pipeline) calculateBytesProcessed(results []*extract.Result) int64 {
 		}
 	}
 	return totalBytes
+}
+
+// markAsFailed marks the pipeline as failed and records the failure time
+func (p *Pipeline) markAsFailed() {
+	p.mutex.Lock()
+	defer p.mutex.Unlock()
+	p.failed = true
+	p.lastFailureTime = time.Now()
+}
+
+// markAsSuccessful marks the pipeline as successful and clears the failure state
+func (p *Pipeline) markAsSuccessful() {
+	p.mutex.Lock()
+	defer p.mutex.Unlock()
+	p.failed = false
+}
+
+// IsFailed returns whether the pipeline is currently in a failed state
+func (p *Pipeline) IsFailed() bool {
+	p.mutex.RLock()
+	defer p.mutex.RUnlock()
+	return p.failed
+}
+
+// GetLastFailureTime returns the time of the last failure
+func (p *Pipeline) GetLastFailureTime() time.Time {
+	p.mutex.RLock()
+	defer p.mutex.RUnlock()
+	return p.lastFailureTime
 }
 
 // Close closes the pipeline and releases resources
@@ -328,14 +387,22 @@ func (m *Manager) StartAllPipelines(ctx context.Context) error {
 	m.mutex.RUnlock()
 
 	var errors []error
+	var successCount int
+
 	for _, pipeline := range pipelines {
 		if err := pipeline.Start(ctx); err != nil {
-			errors = append(errors, err)
+			errors = append(errors, fmt.Errorf("pipeline %s: %w", pipeline.GetName(), err))
+		} else {
+			successCount++
 		}
 	}
 
+	// Log results but don't fail completely if some pipelines started successfully
 	if len(errors) > 0 {
-		return fmt.Errorf("failed to start some pipelines: %v", errors)
+		if successCount > 0 {
+			return fmt.Errorf("started %d pipelines successfully, but failed to start %d pipelines: %v", successCount, len(errors), errors)
+		}
+		return fmt.Errorf("failed to start all pipelines: %v", errors)
 	}
 
 	return nil
@@ -410,6 +477,17 @@ func (m *Manager) UpdatePipelines(configs []config.PipelineConfig) error {
 	return nil
 }
 
+// PipelineStatus represents detailed status information for a pipeline
+type PipelineStatus struct {
+	Name            string    `json:"name"`
+	Running         bool      `json:"running"`
+	Enabled         bool      `json:"enabled"`
+	Failed          bool      `json:"failed"`
+	LastFailureTime time.Time `json:"last_failure_time,omitempty"`
+	Interval        string    `json:"interval"`
+	RetryInterval   string    `json:"retry_interval,omitempty"`
+}
+
 // GetPipelineStatus returns the status of all pipelines
 func (m *Manager) GetPipelineStatus() map[string]bool {
 	m.mutex.RLock()
@@ -418,6 +496,35 @@ func (m *Manager) GetPipelineStatus() map[string]bool {
 	status := make(map[string]bool)
 	for name, pipeline := range m.pipelines {
 		status[name] = pipeline.IsRunning()
+	}
+
+	return status
+}
+
+// GetDetailedPipelineStatus returns detailed status information for all pipelines
+func (m *Manager) GetDetailedPipelineStatus() map[string]PipelineStatus {
+	m.mutex.RLock()
+	defer m.mutex.RUnlock()
+
+	status := make(map[string]PipelineStatus)
+	for name, pipeline := range m.pipelines {
+		pipelineStatus := PipelineStatus{
+			Name:     name,
+			Running:  pipeline.IsRunning(),
+			Enabled:  pipeline.config.Enabled,
+			Failed:   pipeline.IsFailed(),
+			Interval: pipeline.config.Interval.String(),
+		}
+
+		if pipeline.config.RetryInterval > 0 {
+			pipelineStatus.RetryInterval = pipeline.config.RetryInterval.String()
+		}
+
+		if pipeline.IsFailed() {
+			pipelineStatus.LastFailureTime = pipeline.GetLastFailureTime()
+		}
+
+		status[name] = pipelineStatus
 	}
 
 	return status

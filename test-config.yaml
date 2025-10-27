@@ -1,0 +1,123 @@
+# Test Configuration for Pipeline Resilience
+# This configuration includes multiple pipelines with different retry strategies
+
+pipelines:
+  - name: "fast-retry-pipeline"
+    enabled: true
+    interval: "10s"
+    retryInterval: "30s"  # Quick retry for testing
+    
+    extract:
+      elasticsearch_query: |
+        {
+          "query": {
+            "match_all": {}
+          }
+        }
+      urls:
+        - "http://localhost:9200/test-index/_search"
+      cluster_names:
+        - "test"
+      json_path: "hits.hits"
+      timeout: "5s"
+      max_retries: 1
+      insecure_tls: true
+    
+    transform:
+      stateless: true
+      substitute_zeros_for_null: false
+      previous_results_sets: 0
+      output_format: "json"
+    
+    load:
+      streams:
+        - type: "debug"
+          config:
+            path: "/tmp/elasticetl/test/fast-retry"
+            format: "json"
+
+  - name: "slow-retry-pipeline"
+    enabled: true
+    interval: "15s"
+    retryInterval: "2m"  # Slower retry
+    
+    extract:
+      elasticsearch_query: |
+        {
+          "query": {
+            "match_all": {}
+          }
+        }
+      urls:
+        - "http://localhost:9200/another-test-index/_search"
+      cluster_names:
+        - "test"
+      json_path: "hits.hits"
+      timeout: "5s"
+      max_retries: 1
+      insecure_tls: true
+    
+    transform:
+      stateless: true
+      substitute_zeros_for_null: false
+      previous_results_sets: 0
+      output_format: "json"
+    
+    load:
+      streams:
+        - type: "debug"
+          config:
+            path: "/tmp/elasticetl/test/slow-retry"
+            format: "json"
+
+  - name: "no-retry-pipeline"
+    enabled: true
+    interval: "20s"
+    # No retryInterval - failures are permanent
+    
+    extract:
+      elasticsearch_query: |
+        {
+          "query": {
+            "match_all": {}
+          }
+        }
+      urls:
+        - "http://localhost:9200/no-retry-index/_search"
+      cluster_names:
+        - "test"
+      json_path: "hits.hits"
+      timeout: "5s"
+      max_retries: 1
+      insecure_tls: true
+    
+    transform:
+      stateless: true
+      substitute_zeros_for_null: false
+      previous_results_sets: 0
+      output_format: "json"
+    
+    load:
+      streams:
+        - type: "debug"
+          config:
+            path: "/tmp/elasticetl/test/no-retry"
+            format: "json"
+
+global:
+  resource_limits:
+    max_memory_mb: 128
+    max_cpu_percent: 25
+    max_goroutines: 10
+    max_connections: 5
+  
+  metrics:
+    enabled: true
+    port: 8080
+    path: "/metrics"
+    interval: "15s"
+  
+  logging:
+    level: "info"
+    format: "text"
+    output: "stdout"

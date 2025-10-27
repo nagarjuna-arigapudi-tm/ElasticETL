@@ -153,18 +153,32 @@ func setupLogging(level string) {
 
 // printPipelineStatus prints the current status of all pipelines
 func printPipelineStatus(manager *pipeline.Manager) {
-	status := manager.GetPipelineStatus()
+	status := manager.GetDetailedPipelineStatus()
 	if len(status) == 0 {
 		log.Println("No pipelines configured")
 		return
 	}
 
 	log.Println("Pipeline Status:")
-	for name, running := range status {
+	for name, pipelineStatus := range status {
 		statusStr := "stopped"
-		if running {
+		if pipelineStatus.Running {
 			statusStr = "running"
 		}
-		log.Printf("  %s: %s", name, statusStr)
+
+		failedStr := ""
+		if pipelineStatus.Failed {
+			failedStr = " (FAILED)"
+			if !pipelineStatus.LastFailureTime.IsZero() {
+				failedStr += fmt.Sprintf(" - last failure: %s", pipelineStatus.LastFailureTime.Format("2006-01-02 15:04:05"))
+			}
+		}
+
+		retryStr := ""
+		if pipelineStatus.RetryInterval != "" {
+			retryStr = fmt.Sprintf(" - retry: %s", pipelineStatus.RetryInterval)
+		}
+
+		log.Printf("  %s: %s%s%s (interval: %s)", name, statusStr, failedStr, retryStr, pipelineStatus.Interval)
 	}
 }

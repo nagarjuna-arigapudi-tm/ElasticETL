@@ -12,12 +12,13 @@ type Config struct {
 
 // PipelineConfig represents a single ETL pipeline configuration
 type PipelineConfig struct {
-	Name      string          `json:"name" yaml:"name"`
-	Enabled   bool            `json:"enabled" yaml:"enabled"`
-	Interval  time.Duration   `json:"interval" yaml:"interval"`
-	Extract   ExtractConfig   `json:"extract" yaml:"extract"`
-	Transform TransformConfig `json:"transform" yaml:"transform"`
-	Load      LoadConfig      `json:"load" yaml:"load"`
+	Name          string          `json:"name" yaml:"name"`
+	Enabled       bool            `json:"enabled" yaml:"enabled"`
+	Interval      time.Duration   `json:"interval" yaml:"interval"`
+	RetryInterval time.Duration   `json:"retryInterval" yaml:"retryInterval"`
+	Extract       ExtractConfig   `json:"extract" yaml:"extract"`
+	Transform     TransformConfig `json:"transform" yaml:"transform"`
+	Load          LoadConfig      `json:"load" yaml:"load"`
 }
 
 // ExtractConfig contains extraction configuration

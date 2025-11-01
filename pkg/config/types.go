@@ -48,6 +48,7 @@ type FilterConfig struct {
 // TransformConfig contains transformation configuration
 type TransformConfig struct {
 	Stateless              bool                       `json:"stateless" yaml:"stateless"`
+	DropNullValues         bool                       `json:"drop_null_values,omitempty" yaml:"drop_null_values,omitempty"`
 	SubstituteZerosForNull bool                       `json:"substitute_zeros_for_null" yaml:"substitute_zeros_for_null"`
 	PreviousResultsSets    int                        `json:"previous_results_sets" yaml:"previous_results_sets"`
 	ConversionFunctions    []ConversionFunctionConfig `json:"conversion_functions" yaml:"conversion_functions"`

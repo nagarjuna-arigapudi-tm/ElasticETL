@@ -67,8 +67,12 @@ func (t *Transformer) Transform(results []*extract.Result) ([]*TransformedResult
 func (t *Transformer) transformSingle(result *extract.Result) (*TransformedResult, error) {
 	transformedData := make(map[string]interface{})
 
-	// Copy original data
+	// Copy original data, optionally dropping null values
 	for key, value := range result.Data {
+		if t.config.DropNullValues && value == nil {
+			// Skip null values if drop_null_values is enabled
+			continue
+		}
 		transformedData[key] = value
 	}
 
@@ -196,6 +200,11 @@ func (t *Transformer) convertToKB(value interface{}, fromUnit string) (float64, 
 		return 0, err
 	}
 
+	// Use 'bytes' as default unit if not specified
+	if fromUnit == "" {
+		fromUnit = "bytes"
+	}
+
 	switch fromUnit {
 	case "bytes", "b":
 		return numValue / 1024, nil
@@ -217,6 +226,11 @@ func (t *Transformer) convertToMB(value interface{}, fromUnit string) (float64, 
 		return 0, err
 	}
 
+	// Use 'bytes' as default unit if not specified
+	if fromUnit == "" {
+		fromUnit = "bytes"
+	}
+
 	switch fromUnit {
 	case "bytes", "b":
 		return numValue / (1024 * 1024), nil
@@ -236,6 +250,11 @@ func (t *Transformer) convertToGB(value interface{}, fromUnit string) (float64, 
 	numValue, err := t.toFloat(value)
 	if err != nil {
 		return 0, err
+	}
+
+	// Use 'bytes' as default unit if not specified
+	if fromUnit == "" {
+		fromUnit = "bytes"
 	}
 
 	switch fromUnit {
@@ -448,6 +467,54 @@ func (t *Transformer) extractLeftmostIndex(key string) int {
 	return -1
 }
 
+// splitKeyIntoParts splits a flattened key into hierarchical parts
+func (t *Transformer) splitKeyIntoParts(key string) []string {
+	// Split by dots to get path components
+	parts := strings.Split(key, ".")
+	var result []string
+
+	for _, part := range parts {
+		// Handle array indices within each part
+		if strings.Contains(part, "[") {
+			// Split array-indexed parts further
+			re := regexp.MustCompile(`([^\[]+)(\[\d+\])`)
+			matches := re.FindAllStringSubmatch(part, -1)
+
+			if len(matches) > 0 {
+				for _, match := range matches {
+					if len(match) >= 3 {
+						// Add the field name with its array index
+						result = append(result, match[1]+match[2])
+					}
+				}
+			} else {
+				result = append(result, part)
+			}
+		} else {
+			result = append(result, part)
+		}
+	}
+
+	return result
+}
+
+// extractIndexAndField extracts the array index and field name from a path part
+func (t *Transformer) extractIndexAndField(part string) (int, string) {
+	// Check if this part has an array index
+	re := regexp.MustCompile(`^([^\[]+)\[(\d+)\]$`)
+	matches := re.FindStringSubmatch(part)
+
+	if len(matches) >= 3 {
+		fieldName := matches[1]
+		if index, err := strconv.Atoi(matches[2]); err == nil {
+			return index, fieldName
+		}
+	}
+
+	// No array index, return -1 and the field name
+	return -1, part
+}
+
 // generateCSVRows generates CSV rows from flattened data based on unique keys
 // Uses dynamic state tracking to create CSV rows based on depth changes
 func (t *Transformer) generateCSVRows(data map[string]interface{}, uniqueKeys []string) [][]string {
@@ -461,37 +528,52 @@ func (t *Transformer) generateCSVRows(data map[string]interface{}, uniqueKeys []
 		sortedKeys = append(sortedKeys, key)
 	}
 
-	// Sort flattened data by leftmost index first, then by depth and key rules
+	// Sort flattened data according to hierarchical structure
 	sort.Slice(sortedKeys, func(i, j int) bool {
 		keyI, keyJ := sortedKeys[i], sortedKeys[j]
 
-		// Extract leftmost index for both keys
-		indexI := t.extractLeftmostIndex(keyI)
-		indexJ := t.extractLeftmostIndex(keyJ)
+		// Split keys into path components for hierarchical comparison
+		partsI := t.splitKeyIntoParts(keyI)
+		partsJ := t.splitKeyIntoParts(keyJ)
 
-		// Sort by leftmost index first (lowest first)
-		if indexI != indexJ {
-			return indexI < indexJ
+		// Compare path components level by level
+		minLen := len(partsI)
+		if len(partsJ) < minLen {
+			minLen = len(partsJ)
 		}
 
-		// Within same index, apply same rules as analyzeUniqueKeys
-		uniqueKeyI := t.removeArrayIndices(keyI)
-		uniqueKeyJ := t.removeArrayIndices(keyJ)
-		depthI := t.calculateKeyDepth(uniqueKeyI)
-		depthJ := t.calculateKeyDepth(uniqueKeyJ)
+		for level := 0; level < minLen; level++ {
+			partI := partsI[level]
+			partJ := partsJ[level]
 
-		// Sort by depth first
-		if depthI != depthJ {
-			return depthI < depthJ
+			// Extract index and field name from each part
+			indexI, fieldI := t.extractIndexAndField(partI)
+			indexJ, fieldJ := t.extractIndexAndField(partJ)
+
+			// Compare indices first
+			if indexI != indexJ {
+				return indexI < indexJ
+			}
+
+			// Within same index, prioritize "key" field
+			isKeyI := strings.ToLower(fieldI) == "key"
+			isKeyJ := strings.ToLower(fieldJ) == "key"
+
+			if isKeyI && !isKeyJ {
+				return true
+			}
+			if !isKeyI && isKeyJ {
+				return false
+			}
+
+			// Compare field names alphabetically
+			if fieldI != fieldJ {
+				return fieldI < fieldJ
+			}
 		}
 
-		// Within same depth, shorter keys first
-		if len(uniqueKeyI) != len(uniqueKeyJ) {
-			return len(uniqueKeyI) < len(uniqueKeyJ)
-		}
-
-		// Finally alphabetically
-		return uniqueKeyI < uniqueKeyJ
+		// If all compared levels are equal, shorter path comes first
+		return len(partsI) < len(partsJ)
 	})
 
 	// Initialize state tracking maps

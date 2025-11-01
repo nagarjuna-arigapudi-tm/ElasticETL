@@ -347,6 +347,7 @@ func (t *Transformer) convertToCSV(results []*TransformedResult) error {
 }
 
 // analyzeUniqueKeys analyzes flattened JSON keys by depth levels to determine unique column names
+// Returns keys sorted by depth (least depth first), with "key" (case insensitive) prioritized within same depth
 func (t *Transformer) analyzeUniqueKeys(results []*TransformedResult) []string {
 	// Collect all flattened keys from all results
 	allKeys := make(map[string]bool)
@@ -356,35 +357,55 @@ func (t *Transformer) analyzeUniqueKeys(results []*TransformedResult) []string {
 		}
 	}
 
-	// Group keys by depth level
-	keysByDepth := make(map[int][]string)
-	maxDepth := 0
+	// Group keys by depth level and remove array indices
+	uniqueKeySet := make(map[string]bool)
+	keyDepthMap := make(map[string]int)
 
 	for key := range allKeys {
-		depth := t.calculateKeyDepth(key)
-		keysByDepth[depth] = append(keysByDepth[depth], key)
-		if depth > maxDepth {
-			maxDepth = depth
-		}
+		uniqueKey := t.removeArrayIndices(key)
+		depth := t.calculateKeyDepth(uniqueKey)
+		uniqueKeySet[uniqueKey] = true
+		keyDepthMap[uniqueKey] = depth
 	}
 
-	// Process each depth level to extract unique keys
-	uniqueKeySet := make(map[string]bool)
-
-	for depth := 1; depth <= maxDepth; depth++ {
-		keys := keysByDepth[depth]
-		for _, key := range keys {
-			uniqueKey := t.removeArrayIndices(key)
-			uniqueKeySet[uniqueKey] = true
-		}
-	}
-
-	// Convert to sorted slice for consistent column order
+	// Convert to slice for sorting
 	var uniqueKeys []string
 	for key := range uniqueKeySet {
 		uniqueKeys = append(uniqueKeys, key)
 	}
-	sort.Strings(uniqueKeys)
+
+	// Sort by depth first, then by "key" priority, then alphabetically
+	sort.Slice(uniqueKeys, func(i, j int) bool {
+		keyI, keyJ := uniqueKeys[i], uniqueKeys[j]
+		depthI, depthJ := keyDepthMap[keyI], keyDepthMap[keyJ]
+
+		// First sort by depth (least depth first)
+		if depthI != depthJ {
+			return depthI < depthJ
+		}
+
+		// Within same depth, prioritize "key" (case insensitive)
+		keyILower := strings.ToLower(keyI)
+		keyJLower := strings.ToLower(keyJ)
+
+		isKeyI := keyILower == "key" || strings.HasSuffix(keyILower, ".key")
+		isKeyJ := keyJLower == "key" || strings.HasSuffix(keyJLower, ".key")
+
+		if isKeyI && !isKeyJ {
+			return true
+		}
+		if !isKeyI && isKeyJ {
+			return false
+		}
+
+		// If both or neither are "key", sort by length (shorter first)
+		if len(keyI) != len(keyJ) {
+			return len(keyI) < len(keyJ)
+		}
+
+		// Finally, sort alphabetically
+		return keyI < keyJ
+	})
 
 	return uniqueKeys
 }
@@ -411,38 +432,153 @@ func (t *Transformer) removeArrayIndices(key string) string {
 	return re.ReplaceAllString(key, "")
 }
 
-// generateCSVRows generates CSV rows from flattened data based on unique keys
-func (t *Transformer) generateCSVRows(data map[string]interface{}, uniqueKeys []string) [][]string {
-	// Find all array paths and their combinations
-	arrayPaths := t.findArrayPaths(data)
+// extractLeftmostIndex extracts the leftmost array index from a flattened key
+func (t *Transformer) extractLeftmostIndex(key string) int {
+	// Find the first array index in the key
+	re := regexp.MustCompile(`\[(\d+)\]`)
+	matches := re.FindStringSubmatch(key)
 
-	if len(arrayPaths) == 0 {
-		// No arrays, create single row
-		row := make([]string, len(uniqueKeys))
-		for colIdx, uniqueKey := range uniqueKeys {
-			// Find matching key in data
-			if value := t.findValueForUniqueKey(data, uniqueKey); value != nil {
-				row[colIdx] = t.formatValue(value)
+	if len(matches) > 1 {
+		if index, err := strconv.Atoi(matches[1]); err == nil {
+			return index
+		}
+	}
+
+	// Return -1 if no array index found (non-array keys will be sorted first)
+	return -1
+}
+
+// generateCSVRows generates CSV rows from flattened data based on unique keys
+// Uses dynamic state tracking to create CSV rows based on depth changes
+func (t *Transformer) generateCSVRows(data map[string]interface{}, uniqueKeys []string) [][]string {
+	if len(uniqueKeys) == 0 {
+		return [][]string{}
+	}
+
+	// Create sorted list of flattened data keys
+	var sortedKeys []string
+	for key := range data {
+		sortedKeys = append(sortedKeys, key)
+	}
+
+	// Sort flattened data by leftmost index first, then by depth and key rules
+	sort.Slice(sortedKeys, func(i, j int) bool {
+		keyI, keyJ := sortedKeys[i], sortedKeys[j]
+
+		// Extract leftmost index for both keys
+		indexI := t.extractLeftmostIndex(keyI)
+		indexJ := t.extractLeftmostIndex(keyJ)
+
+		// Sort by leftmost index first (lowest first)
+		if indexI != indexJ {
+			return indexI < indexJ
+		}
+
+		// Within same index, apply same rules as analyzeUniqueKeys
+		uniqueKeyI := t.removeArrayIndices(keyI)
+		uniqueKeyJ := t.removeArrayIndices(keyJ)
+		depthI := t.calculateKeyDepth(uniqueKeyI)
+		depthJ := t.calculateKeyDepth(uniqueKeyJ)
+
+		// Sort by depth first
+		if depthI != depthJ {
+			return depthI < depthJ
+		}
+
+		// Within same depth, shorter keys first
+		if len(uniqueKeyI) != len(uniqueKeyJ) {
+			return len(uniqueKeyI) < len(uniqueKeyJ)
+		}
+
+		// Finally alphabetically
+		return uniqueKeyI < uniqueKeyJ
+	})
+
+	// Initialize state tracking maps
+	valueMap := make(map[string]string, len(uniqueKeys))
+	boolMap := make(map[string]bool, len(uniqueKeys))
+	depthMap := make(map[string]int, len(uniqueKeys))
+
+	// Initialize maps with unique keys
+	for _, uniqueKey := range uniqueKeys {
+		valueMap[uniqueKey] = ""
+		boolMap[uniqueKey] = false
+		depthMap[uniqueKey] = t.calculateKeyDepth(uniqueKey)
+	}
+
+	var csvRows [][]string
+	currentDepth := 0
+
+	// Process sorted flattened data
+	for _, key := range sortedKeys {
+		uniqueKey := t.removeArrayIndices(key)
+		keyDepth := depthMap[uniqueKey]
+		value := t.formatValue(data[key])
+
+		// Check if this unique key exists in our tracking
+		if _, exists := depthMap[uniqueKey]; !exists {
+			continue
+		}
+
+		// Handle depth changes
+		if keyDepth < currentDepth {
+			// Depth decreased - replace value and reset deeper levels
+			valueMap[uniqueKey] = value
+			boolMap[uniqueKey] = true
+			currentDepth = keyDepth
+
+			// Reset all keys with same or greater depth
+			for uk := range depthMap {
+				if depthMap[uk] >= keyDepth && uk != uniqueKey {
+					valueMap[uk] = ""
+					boolMap[uk] = false
+				}
+			}
+		} else {
+			// Normal processing - store value and set boolean
+			valueMap[uniqueKey] = value
+			boolMap[uniqueKey] = true
+			if keyDepth > currentDepth {
+				currentDepth = keyDepth
 			}
 		}
-		return [][]string{row}
-	}
 
-	// Generate all possible combinations of array indices
-	combinations := t.generateArrayCombinations(arrayPaths)
-
-	// Create rows for each combination
-	var rows [][]string
-	for _, combination := range combinations {
-		row := make([]string, len(uniqueKeys))
-		for colIdx, uniqueKey := range uniqueKeys {
-			value := t.findValueForCombination(data, uniqueKey, combination)
-			row[colIdx] = t.formatValue(value)
+		// Check if all booleans are true - create CSV row
+		allTrue := true
+		for _, val := range boolMap {
+			if !val {
+				allTrue = false
+				break
+			}
 		}
-		rows = append(rows, row)
+
+		if allTrue {
+			// Create CSV row
+			row := make([]string, len(uniqueKeys))
+			for i, uniqueKey := range uniqueKeys {
+				row[i] = valueMap[uniqueKey]
+			}
+			csvRows = append(csvRows, row)
+
+			// Reset entries at maximum depth
+			maxDepth := 0
+			for _, depth := range depthMap {
+				if depth > maxDepth {
+					maxDepth = depth
+				}
+			}
+
+			// Reset values and booleans for maximum depth keys
+			for uk := range depthMap {
+				if depthMap[uk] == maxDepth {
+					valueMap[uk] = ""
+					boolMap[uk] = false
+				}
+			}
+		}
 	}
 
-	return rows
+	return csvRows
 }
 
 // findArrayPaths identifies all array paths in the flattened data

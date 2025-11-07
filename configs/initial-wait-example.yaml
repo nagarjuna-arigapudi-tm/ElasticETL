@@ -1,0 +1,135 @@
+# Example configuration demonstrating initialWait parameter usage
+# This helps prevent all jobs from starting simultaneously
+
+pipelines:
+  # Pipeline with explicit initialWait of 30 seconds
+  - name: "pipeline-with-initial-wait"
+    enabled: true
+    schedule:
+      interval: "5m"
+      initialWait: "30s"  # Wait 30 seconds before first execution
+    extract:
+      elasticsearch_query: "GET /_cluster/health"
+      urls: ["https://localhost:9200"]
+      auth_headers: ["Authorization: Basic dXNlcjpwYXNz"]
+      interval: "30s"
+      timeout: "10s"
+      max_retries: 3
+    transform:
+      stateless: true
+      output_format: "csv"
+    load:
+      input: "csv_data"
+      streams:
+        - type: "debug"
+          config:
+            output_file: "/tmp/pipeline-with-wait.log"
+
+  # Pipeline with initialWait set to 0 (start immediately)
+  - name: "pipeline-immediate-start"
+    enabled: true
+    schedule:
+      interval: "10m"
+      initialWait: "0s"  # Start immediately, no wait
+    extract:
+      elasticsearch_query: "GET /_nodes/stats"
+      urls: ["https://localhost:9200"]
+      auth_headers: ["Authorization: Basic dXNlcjpwYXNz"]
+      interval: "30s"
+      timeout: "10s"
+      max_retries: 3
+    transform:
+      stateless: true
+      output_format: "csv"
+    load:
+      input: "csv_data"
+      streams:
+        - type: "debug"
+          config:
+            output_file: "/tmp/pipeline-immediate.log"
+
+  # Pipeline without initialWait (will use random 0-3 minute wait)
+  - name: "pipeline-random-wait"
+    enabled: true
+    schedule:
+      interval: "15m"
+      # No initialWait specified - will use random 0-3 minute wait
+    extract:
+      elasticsearch_query: "GET /_cluster/stats"
+      urls: ["https://localhost:9200"]
+      auth_headers: ["Authorization: Basic dXNlcjpwYXNz"]
+      interval: "30s"
+      timeout: "10s"
+      max_retries: 3
+    transform:
+      stateless: true
+      output_format: "csv"
+    load:
+      input: "csv_data"
+      streams:
+        - type: "debug"
+          config:
+            output_file: "/tmp/pipeline-random.log"
+
+  # Pipeline with startTime (initialWait is ignored when startTime is specified)
+  - name: "pipeline-with-start-time"
+    enabled: true
+    schedule:
+      startTime: "09:00:00"  # Start at 9 AM daily
+      interval: "1h"         # Then run every hour
+      initialWait: "2m"      # This will be ignored since startTime is specified
+    extract:
+      elasticsearch_query: "GET /_cluster/health"
+      urls: ["https://localhost:9200"]
+      auth_headers: ["Authorization: Basic dXNlcjpwYXNz"]
+      interval: "30s"
+      timeout: "10s"
+      max_retries: 3
+    transform:
+      stateless: true
+      output_format: "csv"
+    load:
+      input: "csv_data"
+      streams:
+        - type: "debug"
+          config:
+            output_file: "/tmp/pipeline-start-time.log"
+
+  # Pipeline with cron schedule (initialWait is ignored when cron is specified)
+  - name: "pipeline-with-cron"
+    enabled: true
+    schedule:
+      cronSchedule: "0 */30 * * * *"  # Every 30 minutes
+      initialWait: "1m"               # This will be ignored since cron is specified
+    extract:
+      elasticsearch_query: "GET /_nodes/stats"
+      urls: ["https://localhost:9200"]
+      auth_headers: ["Authorization: Basic dXNlcjpwYXNz"]
+      interval: "30s"
+      timeout: "10s"
+      max_retries: 3
+    transform:
+      stateless: true
+      output_format: "csv"
+    load:
+      input: "csv_data"
+      streams:
+        - type: "debug"
+          config:
+            output_file: "/tmp/pipeline-cron.log"
+
+global:
+  resource_limits:
+    max_memory_mb: 512
+    max_cpu_percent: 50
+    max_goroutines: 100
+    max_connections: 50
+  metrics:
+    enabled: true
+    port: 8080
+    path: "/metrics"
+    interval: "30s"
+  logging:
+    level: "info"
+    format: "json"
+    output: "stdout"

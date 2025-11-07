@@ -28,6 +28,8 @@ github.com/prometheus/common v0.65.1-0.20250703115700-7f8b2a0d32d3 h1:R/zO7ombSH
 github.com/prometheus/common v0.65.1-0.20250703115700-7f8b2a0d32d3/go.mod h1:0gZns+BLRQ3V6NdaerOhMbwwRbNh9hkGINtQAsP5GS8=
 github.com/prometheus/prometheus v0.306.0 h1:Q0Pvz/ZKS6vVWCa1VSgNyNJlEe8hxdRlKklFg7SRhNw=
 github.com/prometheus/prometheus v0.306.0/go.mod h1:7hMSGyZHt0dcmZ5r4kFPJ/vxPQU99N5/BGwSPDxeZrQ=
+github.com/robfig/cron/v3 v3.0.1 h1:WdRxkvbJztn8LMz/QEvLN5sBU+xKpSqwwUO1Pjr4qDs=
+github.com/robfig/cron/v3 v3.0.1/go.mod h1:eQICP3HwyT7UooqI/z+Ov+PtYAWygg1TEWWzGIFLtro=
 github.com/rogpeppe/go-internal v1.9.0/go.mod h1:WtVeX8xhTBvf0smdhujwtBcq4Qrzq/fJaraNFVN+nFs=
 github.com/rogpeppe/go-internal v1.10.0 h1:TMyTOH3F/DB16zRVcYyreMH6GnZZrwQVAoYjRBZyWFQ=
 github.com/rogpeppe/go-internal v1.10.0/go.mod h1:UQnix2H7Ngw/k4C5ijL5+65zddjncjaFoBhdsK/akog=

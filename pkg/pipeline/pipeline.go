@@ -27,6 +27,9 @@ type Pipeline struct {
 	running         bool
 	failed          bool
 	lastFailureTime time.Time
+	// Add sync primitives for safe cleanup
+	stopOnce      sync.Once
+	goroutineDone chan struct{}
 }
 
 // NewPipeline creates a new pipeline
@@ -44,12 +47,13 @@ func NewPipeline(cfg config.PipelineConfig, metricsCollector *metrics.Collector)
 	}
 
 	pipeline := &Pipeline{
-		config:      cfg,
-		extractor:   extractor,
-		transformer: transformer,
-		loader:      loader,
-		metrics:     metricsCollector,
-		stopChan:    make(chan struct{}),
+		config:        cfg,
+		extractor:     extractor,
+		transformer:   transformer,
+		loader:        loader,
+		metrics:       metricsCollector,
+		stopChan:      make(chan struct{}),
+		goroutineDone: make(chan struct{}),
 	}
 
 	return pipeline, nil
@@ -80,24 +84,38 @@ func (p *Pipeline) Start(ctx context.Context) error {
 	return nil
 }
 
-// Stop stops the pipeline
+// Stop stops the pipeline and waits for goroutines to finish
 func (p *Pipeline) Stop() error {
-	p.mutex.Lock()
-	defer p.mutex.Unlock()
+	p.stopOnce.Do(func() {
+		p.mutex.Lock()
+		if !p.running {
+			p.mutex.Unlock()
+			return
+		}
 
-	if !p.running {
-		return nil
-	}
+		p.running = false
+		if p.ticker != nil {
+			p.ticker.Stop()
+		}
 
-	p.running = false
-	if p.ticker != nil {
-		p.ticker.Stop()
-	}
+		// Signal goroutines to stop
+		close(p.stopChan)
+		p.mutex.Unlock()
 
-	close(p.stopChan)
+		// Wait for goroutine to finish with timeout
+		timeout := time.NewTimer(5 * time.Second)
+		defer timeout.Stop()
 
-	// Update metrics
-	p.metrics.UpdatePipelineStatus(p.config.Name, false)
+		select {
+		case <-p.goroutineDone:
+			// Goroutine finished successfully
+		case <-timeout.C:
+			// Timeout reached, force exit to prevent hanging
+		}
+
+		// Update metrics
+		p.metrics.UpdatePipelineStatus(p.config.Name, false)
+	})
 
 	return nil
 }
@@ -166,6 +184,12 @@ func (p *Pipeline) run(ctx context.Context) {
 			p.retryTicker.Stop()
 		}
 		p.mutex.Unlock()
+
+		// Signal that this goroutine is done
+		select {
+		case p.goroutineDone <- struct{}{}:
+		default:
+		}
 	}()
 
 	// Execute immediately on start

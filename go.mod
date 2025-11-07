@@ -6,6 +6,7 @@ require (
 	github.com/fsnotify/fsnotify v1.9.0
 	github.com/golang/snappy v1.0.0
 	github.com/prometheus/prometheus v0.306.0
+	github.com/robfig/cron/v3 v3.0.1
 	github.com/tidwall/gjson v1.18.0
 	gopkg.in/yaml.v2 v2.4.0
 )

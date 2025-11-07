@@ -14,8 +14,9 @@ type Config struct {
 type PipelineConfig struct {
 	Name          string          `json:"name" yaml:"name"`
 	Enabled       bool            `json:"enabled" yaml:"enabled"`
-	Interval      time.Duration   `json:"interval" yaml:"interval"`
+	Interval      time.Duration   `json:"interval,omitempty" yaml:"interval,omitempty"` // Deprecated: use Schedule instead
 	RetryInterval time.Duration   `json:"retryInterval" yaml:"retryInterval"`
+	Schedule      ScheduleConfig  `json:"schedule,omitempty" yaml:"schedule,omitempty"`
 	Extract       ExtractConfig   `json:"extract" yaml:"extract"`
 	Transform     TransformConfig `json:"transform" yaml:"transform"`
 	Load          LoadConfig      `json:"load" yaml:"load"`
@@ -43,6 +44,14 @@ type ExtractConfig struct {
 type FilterConfig struct {
 	Type    string `json:"type" yaml:"type"`       // "include" or "exclude"
 	Pattern string `json:"pattern" yaml:"pattern"` // Pattern to match against flattened keys
+}
+
+// ScheduleConfig defines pipeline scheduling configuration
+type ScheduleConfig struct {
+	StartTime    string         `json:"startTime,omitempty" yaml:"startTime,omitempty"`       // Format: "HH:MM:SS"
+	Interval     time.Duration  `json:"interval,omitempty" yaml:"interval,omitempty"`         // Periodic interval
+	CronSchedule string         `json:"cronSchedule,omitempty" yaml:"cronSchedule,omitempty"` // Cron expression (takes precedence)
+	InitialWait  *time.Duration `json:"initialWait,omitempty" yaml:"initialWait,omitempty"`   // Initial wait time when no startTime/cron specified
 }
 
 // TransformConfig contains transformation configuration

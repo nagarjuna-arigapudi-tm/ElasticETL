@@ -1,0 +1,65 @@
+pipelines:
+  - name: "csv-data-pipeline"
+    enabled: true
+    schedule:
+      interval: "5m"
+    extract:
+      output_format: "csv"  # New CSV format support
+      urls:
+        - "http://localhost:9200/_search"
+      cluster_names:
+        - "local-cluster"
+      elasticsearch_query: |
+        {
+          "query": {
+            "match_all": {}
+          },
+          "size": 100
+        }
+      timeout: "30s"
+      max_retries: 3
+      debug:
+        enabled: true
+        path: "/tmp/elasticetl-debug"
+    transform:
+      input:
+        format: "csv"  # Specify CSV input format
+        header: true   # CSV data has header row
+      stateless: false
+      drop_null_values: true
+      conversion_functions:
+        - field_index: 0  # Use field_index for CSV instead of field
+          function: "convert_type"
+          from_type: "string"
+          to_type: "float64"
+        - field_index: 1
+          function: "convert_to_mb"
+          from_unit: "bytes"
+          to_unit: "mb"
+      output_format: "csv"
+    load:
+      input: "csv_data"  # Load CSV data directly
+      streams:
+        - type: "csv"
+          config:
+            file_path: "/tmp/output.csv"
+            include_timestamp: true
+        - type: "debug"
+          config:
+            output_path: "/tmp/debug-output.json"
+
+global:
+  resource_limits:
+    max_memory_mb: 512
+    max_cpu_percent: 80
+    max_goroutines: 100
+    max_connections: 50
+  metrics:
+    enabled: true
+    port: 8080
+    path: "/metrics"
+    interval: "30s"
+  logging:
+    level: "info"
+    format: "json"
+    output: "stdout"

@@ -29,8 +29,9 @@ type ExtractConfig struct {
 	ClusterNames       []string       `json:"cluster_names" yaml:"cluster_names"`
 	AuthHeaders        []string       `json:"auth_headers,omitempty" yaml:"auth_headers,omitempty"`
 	AdditionalHeaders  [][]string     `json:"additional_headers,omitempty" yaml:"additional_headers,omitempty"`
-	JSONPath           string         `json:"json_path" yaml:"json_path"`                 // Single JSON path to extract
-	Filters            []FilterConfig `json:"filters,omitempty" yaml:"filters,omitempty"` // Multiple filters for flattened keys
+	OutputFormat       string         `json:"output_format,omitempty" yaml:"output_format,omitempty"` // "json" (default) or "csv"
+	JSONPath           string         `json:"json_path,omitempty" yaml:"json_path,omitempty"`         // Single JSON path to extract (JSON format only)
+	Filters            []FilterConfig `json:"filters,omitempty" yaml:"filters,omitempty"`             // Multiple filters for flattened keys (JSON format only)
 	Interval           time.Duration  `json:"interval" yaml:"interval"`
 	Timeout            time.Duration  `json:"timeout" yaml:"timeout"`
 	MaxRetries         int            `json:"max_retries" yaml:"max_retries"`
@@ -56,6 +57,7 @@ type ScheduleConfig struct {
 
 // TransformConfig contains transformation configuration
 type TransformConfig struct {
+	Input                  TransformInputConfig       `json:"input,omitempty" yaml:"input,omitempty"`
 	Stateless              bool                       `json:"stateless" yaml:"stateless"`
 	DropNullValues         bool                       `json:"drop_null_values,omitempty" yaml:"drop_null_values,omitempty"`
 	SubstituteZerosForNull bool                       `json:"substitute_zeros_for_null" yaml:"substitute_zeros_for_null"`
@@ -64,14 +66,21 @@ type TransformConfig struct {
 	OutputFormat           string                     `json:"output_format,omitempty" yaml:"output_format,omitempty"` // csv, json (default: json)
 }
 
+// TransformInputConfig defines input format configuration for transformation
+type TransformInputConfig struct {
+	Format string `json:"format,omitempty" yaml:"format,omitempty"` // "json" (default) or "csv"
+	Header bool   `json:"header,omitempty" yaml:"header,omitempty"` // true if CSV data has header row (CSV format only)
+}
+
 // ConversionFunctionConfig defines field conversion functions
 type ConversionFunctionConfig struct {
-	Field    string `json:"field" yaml:"field"`       // Flattened field path
-	Function string `json:"function" yaml:"function"` // convert_type, convert_to_kb, convert_to_mb, convert_to_gb
-	FromType string `json:"from_type,omitempty" yaml:"from_type,omitempty"`
-	ToType   string `json:"to_type,omitempty" yaml:"to_type,omitempty"`
-	FromUnit string `json:"from_unit,omitempty" yaml:"from_unit,omitempty"`
-	ToUnit   string `json:"to_unit,omitempty" yaml:"to_unit,omitempty"`
+	Field      string `json:"field,omitempty" yaml:"field,omitempty"`             // Flattened field path (JSON format)
+	FieldIndex int    `json:"field_index,omitempty" yaml:"field_index,omitempty"` // Column index (CSV format)
+	Function   string `json:"function" yaml:"function"`                           // convert_type, convert_to_kb, convert_to_mb, convert_to_gb
+	FromType   string `json:"from_type,omitempty" yaml:"from_type,omitempty"`
+	ToType     string `json:"to_type,omitempty" yaml:"to_type,omitempty"`
+	FromUnit   string `json:"from_unit,omitempty" yaml:"from_unit,omitempty"`
+	ToUnit     string `json:"to_unit,omitempty" yaml:"to_unit,omitempty"`
 }
 
 // LoadConfig contains load configuration

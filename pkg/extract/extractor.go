@@ -38,7 +38,8 @@ func substituteEnvVars(input string) string {
 type Result struct {
 	Timestamp time.Time              `json:"timestamp"`
 	Source    string                 `json:"source"`
-	Data      map[string]interface{} `json:"data"`
+	Data      map[string]interface{} `json:"data,omitempty"`
+	CSVData   [][]string             `json:"csv_data,omitempty"`
 	Metadata  map[string]interface{} `json:"metadata"`
 }
 
@@ -235,16 +236,10 @@ func (e *Extractor) extractFromEndpoint(ctx context.Context, index int) (*Result
 		return nil, fmt.Errorf("failed to read response: %w", err)
 	}
 
-	// Extract data using JSON paths
-	extractedData, err := e.extractDataFromResponse(body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to extract data: %w", err)
-	}
-
+	// Extract data based on output format
 	result := &Result{
 		Timestamp: time.Now(),
 		Source:    url,
-		Data:      extractedData,
 		Metadata: map[string]interface{}{
 			"endpoint":       url,
 			"cluster_name":   clusterName,
@@ -252,6 +247,22 @@ func (e *Extractor) extractFromEndpoint(ctx context.Context, index int) (*Result
 			"original_query": e.config.ElasticsearchQuery,
 			"response_size":  len(body),
 		},
+	}
+
+	if e.config.OutputFormat == "csv" {
+		// Extract CSV data
+		csvData, err := e.extractCSVDataFromResponse(body)
+		if err != nil {
+			return nil, fmt.Errorf("failed to extract CSV data: %w", err)
+		}
+		result.CSVData = csvData
+	} else {
+		// Extract JSON data using JSON paths (default behavior)
+		extractedData, err := e.extractDataFromResponse(body)
+		if err != nil {
+			return nil, fmt.Errorf("failed to extract data: %w", err)
+		}
+		result.Data = extractedData
 	}
 
 	return result, nil
@@ -288,6 +299,64 @@ func (e *Extractor) extractDataFromResponse(responseBody []byte) (map[string]int
 	filtered := e.applyFilters(flattened)
 
 	return filtered, nil
+}
+
+// extractCSVDataFromResponse extracts CSV data from response body
+func (e *Extractor) extractCSVDataFromResponse(responseBody []byte) ([][]string, error) {
+	reader := strings.NewReader(string(responseBody))
+
+	// Parse CSV data from response body
+	var records [][]string
+	var currentRecord []string
+	var currentField strings.Builder
+	var inQuotes bool
+
+	for {
+		r, _, err := reader.ReadRune()
+		if err != nil {
+			if err.Error() == "EOF" {
+				// Add the last field if there's content
+				if currentField.Len() > 0 || len(currentRecord) > 0 {
+					currentRecord = append(currentRecord, currentField.String())
+				}
+				// Add the last record if there are fields
+				if len(currentRecord) > 0 {
+					records = append(records, currentRecord)
+				}
+				break
+			}
+			return nil, fmt.Errorf("failed to read CSV data: %w", err)
+		}
+
+		switch r {
+		case '"':
+			inQuotes = !inQuotes
+		case ',':
+			if !inQuotes {
+				currentRecord = append(currentRecord, currentField.String())
+				currentField.Reset()
+			} else {
+				currentField.WriteRune(r)
+			}
+		case '\n', '\r':
+			if !inQuotes {
+				if currentField.Len() > 0 || len(currentRecord) > 0 {
+					currentRecord = append(currentRecord, currentField.String())
+				}
+				if len(currentRecord) > 0 {
+					records = append(records, currentRecord)
+				}
+				currentRecord = nil
+				currentField.Reset()
+			} else {
+				currentField.WriteRune(r)
+			}
+		default:
+			currentField.WriteRune(r)
+		}
+	}
+
+	return records, nil
 }
 
 // flattenJSON recursively flattens a JSON structure

@@ -2,7 +2,7 @@ pipelines:
   - name: "sample-pipeline-with-drop-null"
     enabled: true
     interval: 30s
-    retryInterval: 5s
+    retryInterval: 5h
     extract:
       elasticsearch_query: |
         {

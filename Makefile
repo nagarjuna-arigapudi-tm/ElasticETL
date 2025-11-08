@@ -2,8 +2,10 @@
 
 # Variables
 BINARY_NAME=elasticetl
+ENCRYPT_BINARY=encrypt-password
 BUILD_DIR=build
 CMD_DIR=cmd/elasticetl
+ENCRYPT_CMD_DIR=cmd/encrypt-password
 CONFIG_FILE=configs/config.yaml
 
 # Go parameters
@@ -34,6 +36,16 @@ build-local:
 	@echo "Building $(BINARY_NAME) for local platform..."
 	$(GOBUILD) $(LDFLAGS) -o $(BINARY_NAME) ./$(CMD_DIR)
 	@echo "Build complete: $(BINARY_NAME)"
+
+# Build encrypt-password utility
+build-encrypt:
+	@echo "Building $(ENCRYPT_BINARY) utility..."
+	$(GOBUILD) -o $(ENCRYPT_BINARY) ./$(ENCRYPT_CMD_DIR)
+	@echo "Build complete: $(ENCRYPT_BINARY)"
+
+# Build both main application and utilities
+build-all-tools: build-local build-encrypt
+	@echo "All tools built successfully"
 
 # Build for multiple platforms
 build-all: build-linux build-darwin build-windows
@@ -77,6 +89,7 @@ clean:
 	$(GOCLEAN)
 	rm -rf $(BUILD_DIR)
 	rm -f $(BINARY_NAME)
+	rm -f $(ENCRYPT_BINARY)
 	rm -f coverage.out coverage.html
 
 # Run the application with default config
@@ -135,6 +148,8 @@ help:
 	@echo "Available targets:"
 	@echo "  build          - Build the application for current platform"
 	@echo "  build-local    - Build the application in current directory"
+	@echo "  build-encrypt  - Build the encrypt-password utility"
+	@echo "  build-all-tools- Build both main application and utilities"
 	@echo "  build-all      - Build for all supported platforms"
 	@echo "  build-linux    - Build for Linux"
 	@echo "  build-darwin   - Build for macOS"

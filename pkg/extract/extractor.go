@@ -175,10 +175,16 @@ func (e *Extractor) extractFromEndpoint(ctx context.Context, index int) (*Result
 
 	req.Header.Set("Content-Type", "application/json")
 
-	// Add auth header if provided (with environment variable substitution)
+	// Handle authentication - prioritize auth_headers if provided, otherwise use auth_basic
 	if len(e.config.AuthHeaders) > index && e.config.AuthHeaders[index] != "" {
+		// Use auth_headers (existing functionality)
 		authHeader := substituteEnvVars(e.config.AuthHeaders[index])
 		req.Header.Set("Authorization", authHeader)
+	} else if e.config.AuthBasic != nil {
+		// Use auth_basic (new functionality)
+		if err := e.setBasicAuth(req); err != nil {
+			return nil, fmt.Errorf("failed to set basic auth: %w", err)
+		}
 	}
 
 	// Add additional headers if provided (with environment variable substitution)
@@ -476,6 +482,29 @@ func (e *Extractor) matchesFilter(key, pattern string) bool {
 
 	// Use regex to match the key
 	return regex.MatchString(key)
+}
+
+// setBasicAuth sets basic authentication header on the request
+func (e *Extractor) setBasicAuth(req *http.Request) error {
+	if e.config.AuthBasic == nil {
+		return fmt.Errorf("auth_basic configuration is nil")
+	}
+
+	// Process the password based on password type
+	processedPassword, err := utils.ProcessBasicAuthPassword(
+		e.config.AuthBasic.Password,
+		e.config.AuthBasic.PasswordType,
+		e.config.AuthBasic.Passkey,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to process password: %w", err)
+	}
+
+	// Create and set the basic auth header
+	authHeader := utils.CreateBasicAuthHeader(e.config.AuthBasic.User, processedPassword)
+	req.Header.Set("Authorization", authHeader)
+
+	return nil
 }
 
 // UpdateConfig updates the extractor configuration

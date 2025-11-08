@@ -24,21 +24,30 @@ type PipelineConfig struct {
 
 // ExtractConfig contains extraction configuration
 type ExtractConfig struct {
-	ElasticsearchQuery string         `json:"elasticsearch_query" yaml:"elasticsearch_query"`
-	URLs               []string       `json:"urls" yaml:"urls"`
-	ClusterNames       []string       `json:"cluster_names" yaml:"cluster_names"`
-	AuthHeaders        []string       `json:"auth_headers,omitempty" yaml:"auth_headers,omitempty"`
-	AdditionalHeaders  [][]string     `json:"additional_headers,omitempty" yaml:"additional_headers,omitempty"`
-	OutputFormat       string         `json:"output_format,omitempty" yaml:"output_format,omitempty"` // "json" (default) or "csv"
-	JSONPath           string         `json:"json_path,omitempty" yaml:"json_path,omitempty"`         // Single JSON path to extract (JSON format only)
-	Filters            []FilterConfig `json:"filters,omitempty" yaml:"filters,omitempty"`             // Multiple filters for flattened keys (JSON format only)
-	Interval           time.Duration  `json:"interval" yaml:"interval"`
-	Timeout            time.Duration  `json:"timeout" yaml:"timeout"`
-	MaxRetries         int            `json:"max_retries" yaml:"max_retries"`
-	StartTime          string         `json:"start_time,omitempty" yaml:"start_time,omitempty"`
-	EndTime            string         `json:"end_time,omitempty" yaml:"end_time,omitempty"`
-	InsecureTLS        bool           `json:"insecure_tls,omitempty" yaml:"insecure_tls,omitempty"`
-	Debug              DebugConfig    `json:"debug,omitempty" yaml:"debug,omitempty"`
+	ElasticsearchQuery string                  `json:"elasticsearch_query" yaml:"elasticsearch_query"`
+	URLs               []string                `json:"urls" yaml:"urls"`
+	ClusterNames       []string                `json:"cluster_names" yaml:"cluster_names"`
+	AuthHeaders        []string                `json:"auth_headers,omitempty" yaml:"auth_headers,omitempty"`
+	AuthBasic          *ExtractBasicAuthConfig `json:"auth_basic,omitempty" yaml:"auth_basic,omitempty"`
+	AdditionalHeaders  [][]string              `json:"additional_headers,omitempty" yaml:"additional_headers,omitempty"`
+	OutputFormat       string                  `json:"output_format,omitempty" yaml:"output_format,omitempty"` // "json" (default) or "csv"
+	JSONPath           string                  `json:"json_path,omitempty" yaml:"json_path,omitempty"`         // Single JSON path to extract (JSON format only)
+	Filters            []FilterConfig          `json:"filters,omitempty" yaml:"filters,omitempty"`             // Multiple filters for flattened keys (JSON format only)
+	Interval           time.Duration           `json:"interval" yaml:"interval"`
+	Timeout            time.Duration           `json:"timeout" yaml:"timeout"`
+	MaxRetries         int                     `json:"max_retries" yaml:"max_retries"`
+	StartTime          string                  `json:"start_time,omitempty" yaml:"start_time,omitempty"`
+	EndTime            string                  `json:"end_time,omitempty" yaml:"end_time,omitempty"`
+	InsecureTLS        bool                    `json:"insecure_tls,omitempty" yaml:"insecure_tls,omitempty"`
+	Debug              DebugConfig             `json:"debug,omitempty" yaml:"debug,omitempty"`
+}
+
+// ExtractBasicAuthConfig defines basic authentication configuration for extraction
+type ExtractBasicAuthConfig struct {
+	User         string `json:"user" yaml:"user"`
+	Password     string `json:"password" yaml:"password"`
+	PasswordType string `json:"password_type,omitempty" yaml:"password_type,omitempty"` // PLAIN_TEXT, PLAIN_TEXT_BASE64, ENCRYPTED, ENCRYPTED_BASE64, ENV_VAR, ENV_VAR_BASE64, ENV_VAR_ENCRYPTED, ENV_VAR_ENCRYPTED_BASE64
+	Passkey      string `json:"passkey,omitempty" yaml:"passkey,omitempty"`             // Encryption key for ENCRYPTED types
 }
 
 // FilterConfig defines filtering rules for flattened JSON keys

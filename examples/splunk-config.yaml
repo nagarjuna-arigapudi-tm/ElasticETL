@@ -1,0 +1,111 @@
+# Example configuration for Splunk endpoint with URL-encoded requests and insecure TLS
+pipelines:
+  - name: "splunk-data-pipeline"
+    enabled: true
+    interval: 30s
+    extract:
+      # Renamed from elasticsearch_query to query
+      query: 'search index=myindex earliest=-1h@h latest=now | table _time, host, source, message'
+      
+      # New endpoint_type parameter - "urlencoded" for Splunk-style APIs
+      endpoint_type: "urlencoded"
+      
+      # New insecureTLS parameter - allows insecure TLS connections
+      insecure_tls: true
+      
+      urls:
+        - "https://myhost:8089/servicesNS/admin/search/jobs/export?output_mode=csv"
+      
+      cluster_names:
+        - "splunk-cluster"
+      
+      # Basic authentication support
+      auth_basic:
+        user: "admin"
+        password: "mypassword"
+        password_type: "PLAIN_TEXT"
+      
+      # Additional headers can still be used
+      additional_headers:
+        - 
+          - "X-Custom-Header: CustomValue"
+          - "Accept: text/csv"
+      
+      output_format: "csv"
+      timeout: 30s
+      max_retries: 3
+      
+    transform:
+      output_format: "csv"
+      stateless: true
+      
+    load:
+      input: "csv_data"
+      streams:
+        - type: "debug"
+          config:
+            output_file: "/tmp/splunk-data.csv"
+
+  - name: "elasticsearch-data-pipeline"
+    enabled: true
+    interval: 60s
+    extract:
+      # Standard Elasticsearch configuration (generic endpoint_type - default)
+      query: |
+        {
+          "query": {
+            "range": {
+              "@timestamp": {
+                "gte": "now-1h",
+                "lte": "now"
+              }
+            }
+          },
+          "size": 1000
+        }
+      
+      # endpoint_type defaults to "generic" when not specified
+      # insecure_tls defaults to false when not specified (secure TLS)
+      
+      urls:
+        - "https://elasticsearch:9200/logs-*/_search"
+      
+      cluster_names:
+        - "es-cluster"
+      
+      # Using auth_headers for Elasticsearch
+      auth_headers:
+        - "Bearer ${ES_TOKEN}"
+      
+      json_path: "hits.hits"
+      timeout: 30s
+      max_retries: 3
+      
+    transform:
+      output_format: "json"
+      stateless: true
+      
+    load:
+      input: "transformed_data"
+      streams:
+        - type: "debug"
+          config:
+            output_file: "/tmp/elasticsearch-data.json"
+
+global:
+  resource_limits:
+    max_memory_mb: 512
+    max_cpu_percent: 80
+    max_goroutines: 100
+    max_connections: 50
+  
+  metrics:
+    enabled: true
+    port: 8080
+    path: "/metrics"
+    interval: 30s
+  
+  logging:
+    level: "info"
+    format: "json"
+    output: "stdout"

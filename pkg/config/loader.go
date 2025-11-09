@@ -133,8 +133,8 @@ func (l *Loader) validateConfig(config *Config) error {
 			return fmt.Errorf("pipeline %s: at least one cluster name is required", pipeline.Name)
 		}
 
-		if pipeline.Extract.ElasticsearchQuery == "" {
-			return fmt.Errorf("pipeline %s: elasticsearch query is required", pipeline.Name)
+		if pipeline.Extract.Query == "" {
+			return fmt.Errorf("pipeline %s: query is required", pipeline.Name)
 		}
 
 		if len(pipeline.Load.Streams) == 0 {

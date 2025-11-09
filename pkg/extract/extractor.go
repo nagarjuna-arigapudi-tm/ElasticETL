@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -158,22 +159,45 @@ func (e *Extractor) Extract(ctx context.Context) ([]*Result, error) {
 
 // extractFromEndpoint extracts data from a single endpoint by index
 func (e *Extractor) extractFromEndpoint(ctx context.Context, index int) (*Result, error) {
-	url := e.config.URLs[index]
+	apiURL := e.config.URLs[index]
 	clusterName := e.config.ClusterNames[index]
 
 	// Substitute macros in the query
-	processedQuery, err := e.macroSubstituter.SubstituteQuery(e.config.ElasticsearchQuery, clusterName)
+	processedQuery, err := e.macroSubstituter.SubstituteQuery(e.config.Query, clusterName)
 	if err != nil {
 		return nil, fmt.Errorf("failed to substitute macros in query: %w", err)
 	}
 
-	// Prepare Elasticsearch query - use raw query string directly
-	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBufferString(processedQuery))
-	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
+	var req *http.Request
+
+	// Determine endpoint type - default to "generic" if not specified
+	endpointType := e.config.EndpointType
+	if endpointType == "" {
+		endpointType = "generic"
 	}
 
-	req.Header.Set("Content-Type", "application/json")
+	// Create request based on endpoint type
+	if endpointType == "urlencoded" {
+		// URL-encoded endpoint (Splunk-style)
+		form := url.Values{}
+		form.Set("search", processedQuery)
+
+		req, err = http.NewRequestWithContext(ctx, "POST", apiURL, strings.NewReader(form.Encode()))
+		if err != nil {
+			return nil, fmt.Errorf("failed to create request: %w", err)
+		}
+
+		// Set proper headers for form data
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	} else {
+		// Generic endpoint (Elasticsearch-style) - default behavior
+		req, err = http.NewRequestWithContext(ctx, "POST", apiURL, bytes.NewBufferString(processedQuery))
+		if err != nil {
+			return nil, fmt.Errorf("failed to create request: %w", err)
+		}
+
+		req.Header.Set("Content-Type", "application/json")
+	}
 
 	// Handle authentication - prioritize auth_headers if provided, otherwise use auth_basic
 	if len(e.config.AuthHeaders) > index && e.config.AuthHeaders[index] != "" {
@@ -245,12 +269,13 @@ func (e *Extractor) extractFromEndpoint(ctx context.Context, index int) (*Result
 	// Extract data based on output format
 	result := &Result{
 		Timestamp: time.Now(),
-		Source:    url,
+		Source:    apiURL,
 		Metadata: map[string]interface{}{
-			"endpoint":       url,
+			"endpoint":       apiURL,
 			"cluster_name":   clusterName,
 			"query":          processedQuery,
-			"original_query": e.config.ElasticsearchQuery,
+			"original_query": e.config.Query,
+			"endpoint_type":  endpointType,
 			"response_size":  len(body),
 		},
 	}

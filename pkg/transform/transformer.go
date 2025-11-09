@@ -393,7 +393,7 @@ func (t *Transformer) analyzeUniqueKeys(results []*TransformedResult) []string {
 		uniqueKeys = append(uniqueKeys, key)
 	}
 
-	// Sort by depth first, then by "key" priority, then alphabetically
+	// Sort by depth first (least depth first), then by "key" priority within same depth
 	sort.Slice(uniqueKeys, func(i, j int) bool {
 		keyI, keyJ := uniqueKeys[i], uniqueKeys[j]
 		depthI, depthJ := keyDepthMap[keyI], keyDepthMap[keyJ]
@@ -407,6 +407,7 @@ func (t *Transformer) analyzeUniqueKeys(results []*TransformedResult) []string {
 		keyILower := strings.ToLower(keyI)
 		keyJLower := strings.ToLower(keyJ)
 
+		// Check if key name is "key" (case insensitive)
 		isKeyI := keyILower == "key" || strings.HasSuffix(keyILower, ".key")
 		isKeyJ := keyJLower == "key" || strings.HasSuffix(keyJLower, ".key")
 

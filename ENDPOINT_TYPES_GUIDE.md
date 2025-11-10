@@ -117,6 +117,9 @@ extract:
 ```yaml
 pipelines:
   - name: "splunk-pipeline"
+    enabled: true
+    schedule:
+      interval: 30s  # Run every 30 seconds
     extract:
       query: 'search index=web earliest=-1h@h | table _time, clientip, status'
       endpoint_type: "urlencoded"
@@ -137,6 +140,9 @@ pipelines:
 ```yaml
 pipelines:
   - name: "elasticsearch-pipeline"
+    enabled: true
+    schedule:
+      cronSchedule: "0 */5 * * * *"  # Run every 5 minutes
     extract:
       query: |
         {

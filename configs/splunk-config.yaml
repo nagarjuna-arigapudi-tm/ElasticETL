@@ -2,8 +2,7 @@
 pipelines:
   - name: "splunk-data-pipeline"
     enabled: true
-    schedule:
-      cronSchedule: "07,17,27,37,47,57,*,*,*,*"
+    interval: 30s
     extract:
       # Renamed from elasticsearch_query to query
       query: 'search index=myindex earliest=-1h@h latest=now | table _time, host, source, message'
@@ -49,8 +48,7 @@ pipelines:
 
   - name: "elasticsearch-data-pipeline"
     enabled: true
-    schedule:
-      interval: 60s
+    interval: 60s
     extract:
       # Standard Elasticsearch configuration (generic endpoint_type - default)
       query: |

@@ -121,8 +121,17 @@ func (l *Loader) validateConfig(config *Config) error {
 			return fmt.Errorf("pipeline %d: name is required", i)
 		}
 
-		if pipeline.Interval <= 0 {
-			return fmt.Errorf("pipeline %s: interval must be positive", pipeline.Name)
+		// Validate schedule configuration - either interval or cron schedule must be specified
+		if pipeline.Schedule.Interval <= 0 && pipeline.Schedule.CronSchedule == "" {
+			// Check for deprecated interval field for backward compatibility
+			if pipeline.Interval <= 0 {
+				return fmt.Errorf("pipeline %s: either schedule.interval must be positive or schedule.cronSchedule must be specified", pipeline.Name)
+			}
+		}
+
+		// If both interval and cron are specified, cron takes precedence (no error, just a note)
+		if pipeline.Schedule.Interval > 0 && pipeline.Schedule.CronSchedule != "" {
+			// This is valid - cron takes precedence over interval
 		}
 
 		if len(pipeline.Extract.URLs) == 0 {

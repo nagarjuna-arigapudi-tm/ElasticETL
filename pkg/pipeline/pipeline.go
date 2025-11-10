@@ -20,7 +20,7 @@ type Pipeline struct {
 	transformer     *transform.Transformer
 	loader          *load.Loader
 	metrics         *metrics.Collector
-	ticker          *time.Ticker
+	scheduler       *Scheduler
 	retryTicker     *time.Ticker
 	stopChan        chan struct{}
 	mutex           sync.RWMutex
@@ -73,13 +73,20 @@ func (p *Pipeline) Start(ctx context.Context) error {
 	}
 
 	p.running = true
-	p.ticker = time.NewTicker(p.config.Interval)
+
+	// Create scheduler with new schedule configuration
+	p.scheduler = NewScheduler(p.config.Schedule, p.config.Interval)
 
 	// Update metrics
 	p.metrics.UpdatePipelineStatus(p.config.Name, true)
 
-	// Start pipeline execution loop
-	go p.run(ctx)
+	// Start scheduler with execution function
+	if err := p.scheduler.Start(ctx, func() {
+		p.execute(ctx)
+	}); err != nil {
+		p.running = false
+		return fmt.Errorf("failed to start scheduler: %w", err)
+	}
 
 	return nil
 }
@@ -94,24 +101,13 @@ func (p *Pipeline) Stop() error {
 		}
 
 		p.running = false
-		if p.ticker != nil {
-			p.ticker.Stop()
+		if p.scheduler != nil {
+			p.scheduler.Stop()
 		}
 
 		// Signal goroutines to stop
 		close(p.stopChan)
 		p.mutex.Unlock()
-
-		// Wait for goroutine to finish with timeout
-		timeout := time.NewTimer(5 * time.Second)
-		defer timeout.Stop()
-
-		select {
-		case <-p.goroutineDone:
-			// Goroutine finished successfully
-		case <-timeout.C:
-			// Timeout reached, force exit to prevent hanging
-		}
 
 		// Update metrics
 		p.metrics.UpdatePipelineStatus(p.config.Name, false)
@@ -142,8 +138,8 @@ func (p *Pipeline) UpdateConfig(cfg config.PipelineConfig) error {
 	// Stop if running
 	if p.running {
 		p.running = false
-		if p.ticker != nil {
-			p.ticker.Stop()
+		if p.scheduler != nil {
+			p.scheduler.Stop()
 		}
 		close(p.stopChan)
 		p.stopChan = make(chan struct{})
@@ -162,56 +158,21 @@ func (p *Pipeline) UpdateConfig(cfg config.PipelineConfig) error {
 	// Restart if it was running and still enabled
 	if wasRunning && cfg.Enabled {
 		p.running = true
-		p.ticker = time.NewTicker(cfg.Interval)
-		go p.run(context.Background()) // Use background context for restart
+		// Create new scheduler with updated configuration
+		p.scheduler = NewScheduler(cfg.Schedule, cfg.Interval)
+		// Start scheduler with execution function
+		if err := p.scheduler.Start(context.Background(), func() {
+			p.execute(context.Background())
+		}); err != nil {
+			p.running = false
+			return fmt.Errorf("failed to start scheduler: %w", err)
+		}
 	}
 
 	// Update metrics
 	p.metrics.UpdatePipelineStatus(cfg.Name, cfg.Enabled && p.running)
 
 	return nil
-}
-
-// run executes the pipeline loop
-func (p *Pipeline) run(ctx context.Context) {
-	defer func() {
-		p.mutex.Lock()
-		p.running = false
-		if p.ticker != nil {
-			p.ticker.Stop()
-		}
-		if p.retryTicker != nil {
-			p.retryTicker.Stop()
-		}
-		p.mutex.Unlock()
-
-		// Signal that this goroutine is done
-		select {
-		case p.goroutineDone <- struct{}{}:
-		default:
-		}
-	}()
-
-	// Execute immediately on start
-	p.execute(ctx)
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-p.stopChan:
-			return
-		case <-p.ticker.C:
-			// Only execute if not in failed state or if retry interval has passed
-			p.mutex.RLock()
-			shouldExecute := !p.failed || (p.config.RetryInterval > 0 && time.Since(p.lastFailureTime) >= p.config.RetryInterval)
-			p.mutex.RUnlock()
-
-			if shouldExecute {
-				p.execute(ctx)
-			}
-		}
-	}
 }
 
 // execute performs a single ETL execution
@@ -532,12 +493,22 @@ func (m *Manager) GetDetailedPipelineStatus() map[string]PipelineStatus {
 
 	status := make(map[string]PipelineStatus)
 	for name, pipeline := range m.pipelines {
+		// Determine schedule display string
+		scheduleStr := ""
+		if pipeline.config.Schedule.CronSchedule != "" {
+			scheduleStr = fmt.Sprintf("cron: %s", pipeline.config.Schedule.CronSchedule)
+		} else if pipeline.config.Schedule.Interval > 0 {
+			scheduleStr = fmt.Sprintf("interval: %s", pipeline.config.Schedule.Interval.String())
+		} else {
+			scheduleStr = "not configured"
+		}
+
 		pipelineStatus := PipelineStatus{
 			Name:     name,
 			Running:  pipeline.IsRunning(),
 			Enabled:  pipeline.config.Enabled,
 			Failed:   pipeline.IsFailed(),
-			Interval: pipeline.config.Interval.String(),
+			Interval: scheduleStr,
 		}
 
 		if pipeline.config.RetryInterval > 0 {

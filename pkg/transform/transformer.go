@@ -41,15 +41,24 @@ func (t *Transformer) Transform(results []*extract.Result) ([]*TransformedResult
 	var transformedResults []*TransformedResult
 
 	for _, result := range results {
-		transformed, err := t.transformSingle(result)
+		var transformed *TransformedResult
+		var err error
+
+		// Check if input format is CSV and CSV data is available
+		if t.config.Input.Format == "csv" && len(result.CSVData) > 0 {
+			transformed, err = t.transformSingleCSV(result)
+		} else {
+			transformed, err = t.transformSingle(result)
+		}
+
 		if err != nil {
 			return nil, fmt.Errorf("failed to transform result from %s: %w", result.Source, err)
 		}
 		transformedResults = append(transformedResults, transformed)
 	}
 
-	// Convert to CSV format if requested
-	if t.config.OutputFormat == "csv" {
+	// Convert to CSV format if requested (only for JSON input)
+	if t.config.OutputFormat == "csv" && t.config.Input.Format != "csv" {
 		if err := t.convertToCSV(transformedResults); err != nil {
 			return nil, fmt.Errorf("failed to convert to CSV: %w", err)
 		}
@@ -92,6 +101,105 @@ func (t *Transformer) transformSingle(result *extract.Result) (*TransformedResul
 		Result:          result,
 		TransformedData: transformedData,
 	}, nil
+}
+
+// transformSingleCSV transforms a single result with CSV data
+func (t *Transformer) transformSingleCSV(result *extract.Result) (*TransformedResult, error) {
+	if len(result.CSVData) == 0 {
+		return &TransformedResult{
+			Result:  result,
+			CSVData: [][]string{},
+		}, nil
+	}
+
+	var csvHeaders []string
+	var csvData [][]string
+	startRowIndex := 0
+
+	// Handle header extraction if configured
+	if t.config.Input.Header && len(result.CSVData) > 0 {
+		csvHeaders = make([]string, len(result.CSVData[0]))
+		copy(csvHeaders, result.CSVData[0])
+		startRowIndex = 1
+	}
+
+	// Process each row starting from the appropriate index
+	for i := startRowIndex; i < len(result.CSVData); i++ {
+		row := result.CSVData[i]
+
+		// Drop entire row if any element is null and drop_null_values is true
+		if t.config.DropNullValues {
+			hasNull := false
+			for _, cell := range row {
+				if cell == "" || cell == "null" || cell == "NULL" {
+					hasNull = true
+					break
+				}
+			}
+			if hasNull {
+				continue // Skip this row
+			}
+		}
+
+		// Apply conversion functions using column index
+		transformedRow := make([]string, len(row))
+		copy(transformedRow, row)
+
+		for _, convFunc := range t.config.ConversionFunctions {
+			if convFunc.FieldIndex >= 0 && convFunc.FieldIndex < len(transformedRow) {
+				originalValue := transformedRow[convFunc.FieldIndex]
+				convertedValue, err := t.applyCSVConversionFunction(originalValue, convFunc)
+				if err != nil {
+					return nil, fmt.Errorf("conversion function failed for column %d: %w", convFunc.FieldIndex, err)
+				}
+				transformedRow[convFunc.FieldIndex] = convertedValue
+			}
+		}
+
+		csvData = append(csvData, transformedRow)
+	}
+
+	return &TransformedResult{
+		Result:     result,
+		CSVData:    csvData,
+		CSVHeaders: csvHeaders,
+	}, nil
+}
+
+// applyCSVConversionFunction applies conversion function to a CSV cell value
+func (t *Transformer) applyCSVConversionFunction(value string, convFunc config.ConversionFunctionConfig) (string, error) {
+	switch convFunc.Function {
+	case "convert_type":
+		converted, err := t.convertType(value, convFunc.FromType, convFunc.ToType)
+		if err != nil {
+			return value, err
+		}
+		return t.formatValue(converted), nil
+
+	case "convert_to_kb":
+		converted, err := t.convertToKB(value, convFunc.FromUnit)
+		if err != nil {
+			return value, err
+		}
+		return t.formatValue(converted), nil
+
+	case "convert_to_mb":
+		converted, err := t.convertToMB(value, convFunc.FromUnit)
+		if err != nil {
+			return value, err
+		}
+		return t.formatValue(converted), nil
+
+	case "convert_to_gb":
+		converted, err := t.convertToGB(value, convFunc.FromUnit)
+		if err != nil {
+			return value, err
+		}
+		return t.formatValue(converted), nil
+
+	default:
+		return value, fmt.Errorf("unknown conversion function: %s", convFunc.Function)
+	}
 }
 
 // substituteZerosForNull replaces null/nil values with zeros

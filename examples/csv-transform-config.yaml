@@ -1,0 +1,51 @@
+pipelines:
+  - name: "csv-data-pipeline"
+    enabled: true
+    schedule:
+      interval: "30s"
+    extract:
+      urls:
+        - "http://example.com/api/csv-data"
+      cluster_names:
+        - "example-cluster"
+      auth_headers:
+        - "Bearer ${API_TOKEN}"
+      output_format: "csv"  # Extract data as CSV
+      timeout: "30s"
+      max_retries: 3
+    transform:
+      input:
+        format: "csv"       # Process CSV input data
+        header: true        # First row contains headers
+      drop_null_values: true # Drop rows with any null values
+      conversion_functions:
+        - field_index: 0    # Convert first column (index 0)
+          function: "convert_type"
+          from_type: "string"
+          to_type: "int"
+        - field_index: 2    # Convert third column (index 2) 
+          function: "convert_to_mb"
+          from_unit: "bytes"
+    load:
+      input: "csv_data"     # Use CSV data for loading
+      streams:
+        - type: "csv"
+          config:
+            file_path: "/tmp/transformed_data.csv"
+            include_timestamp: true
+
+global:
+  resource_limits:
+    max_memory_mb: 512
+    max_cpu_percent: 50
+    max_goroutines: 100
+    max_connections: 10
+  metrics:
+    enabled: true
+    port: 8080
+    path: "/metrics"
+    interval: "10s"
+  logging:
+    level: "info"
+    format: "json"
+    output: "stdout"

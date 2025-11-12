@@ -1,0 +1,42 @@
+pipelines:
+  - name: "cron-test-pipeline"
+    enabled: true
+    schedule:
+      cronSchedule: "0 07,17,27,37,47,57 * * * *"  # Run at minutes 7,17,27,37,47,57 of every hour
+    extract:
+      urls:
+        - "http://example.com/api/data"
+      cluster_names:
+        - "test-cluster"
+      auth_headers:
+        - "Bearer ${API_TOKEN}"
+      timeout: "30s"
+      max_retries: 3
+    transform:
+      stateless: true
+      drop_null_values: false
+      substitute_zeros_for_null: false
+      previous_results_sets: 0
+      conversion_functions: []
+    load:
+      input: "transformed_data"
+      streams:
+        - type: "debug"
+          config:
+            output_file: "/tmp/cron_test_output.json"
+
+global:
+  resource_limits:
+    max_memory_mb: 256
+    max_cpu_percent: 25
+    max_goroutines: 50
+    max_connections: 5
+  metrics:
+    enabled: true
+    port: 8080
+    path: "/metrics"
+    interval: "10s"
+  logging:
+    level: "info"
+    format: "json"
+    output: "stdout"

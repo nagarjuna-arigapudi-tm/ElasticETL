@@ -90,12 +90,19 @@ func (s *Scheduler) startCronSchedule(ctx context.Context, executeFunc func()) e
 	s.cronScheduler = cron.New(cron.WithSeconds()) // Support seconds in cron expressions
 
 	_, err := s.cronScheduler.AddFunc(s.config.CronSchedule, func() {
-		select {
-		case s.executeChan <- struct{}{}:
-			// Signal execution
-		default:
-			// Channel is full, skip this execution
-		}
+		// Execute directly in the cron callback to avoid channel issues
+		// Use a separate goroutine to prevent blocking the cron scheduler
+		go func() {
+			// Check if context is still valid before executing
+			select {
+			case <-ctx.Done():
+				return
+			case <-s.stopChan:
+				return
+			default:
+				executeFunc()
+			}
+		}()
 	})
 
 	if err != nil {
@@ -105,7 +112,7 @@ func (s *Scheduler) startCronSchedule(ctx context.Context, executeFunc func()) e
 
 	s.cronScheduler.Start()
 
-	// Start execution handler with proper cleanup
+	// Start a monitoring goroutine to handle context cancellation and cleanup
 	go func() {
 		defer func() {
 			// Signal that this goroutine is done
@@ -114,7 +121,14 @@ func (s *Scheduler) startCronSchedule(ctx context.Context, executeFunc func()) e
 			default:
 			}
 		}()
-		s.handleExecution(ctx, executeFunc)
+
+		// Wait for context cancellation or stop signal
+		select {
+		case <-ctx.Done():
+			s.cronScheduler.Stop()
+		case <-s.stopChan:
+			s.cronScheduler.Stop()
+		}
 	}()
 
 	return nil
@@ -308,9 +322,9 @@ func (s *Scheduler) Stop() {
 		defer timeout.Stop()
 
 		goroutinesFinished := 0
-		expectedGoroutines := 1 // handleExecution goroutine
+		expectedGoroutines := 1 // monitoring goroutine for cron or handleExecution for interval
 		if s.config.CronSchedule == "" {
-			expectedGoroutines = 2 // handleExecution + ticker goroutine
+			expectedGoroutines = 2 // handleExecution + ticker goroutine for interval scheduling
 		}
 
 		for goroutinesFinished < expectedGoroutines {

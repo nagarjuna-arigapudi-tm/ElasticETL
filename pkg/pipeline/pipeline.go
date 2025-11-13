@@ -91,6 +91,26 @@ func (p *Pipeline) Start(ctx context.Context) error {
 	return nil
 }
 
+// shouldWriteExtractDebugOutput checks if extract debug output should be written
+func (p *Pipeline) shouldWriteExtractDebugOutput() bool {
+	return p.config.Extract.Debug.FinalQuery || p.config.Extract.Debug.APIResponse || p.config.Extract.Debug.FinalOutput
+}
+
+// writeExtractDebugOutput writes extract debug output with pipeline name
+func (p *Pipeline) writeExtractDebugOutput(results []*extract.Result) error {
+	return p.extractor.WriteDebugOutputWithPipelineName(results, p.config.Name)
+}
+
+// shouldWriteTransformDebugOutput checks if transform debug output should be written
+func (p *Pipeline) shouldWriteTransformDebugOutput() bool {
+	return p.config.Transform.Debug.Input || p.config.Transform.Debug.TransformedOutput || p.config.Transform.Debug.FinalOutput
+}
+
+// writeTransformDebugOutput writes transform debug output with pipeline name
+func (p *Pipeline) writeTransformDebugOutput(inputResults []*extract.Result, transformResults []*transform.TransformedResult) error {
+	return p.transformer.WriteDebugOutputWithPipelineName(inputResults, transformResults, p.config.Name)
+}
+
 // Stop stops the pipeline and waits for goroutines to finish
 func (p *Pipeline) Stop() error {
 	p.stopOnce.Do(func() {
@@ -198,6 +218,13 @@ func (p *Pipeline) execute(ctx context.Context) {
 		return
 	}
 
+	// Write extract debug output with pipeline name if enabled
+	if p.shouldWriteExtractDebugOutput() {
+		if err := p.writeExtractDebugOutput(extractResults); err != nil {
+			fmt.Printf("Failed to write extract debug output: %v\n", err)
+		}
+	}
+
 	if len(extractResults) == 0 {
 		// No data extracted, but not an error - clear failure state
 		duration := time.Since(startTime)
@@ -213,6 +240,13 @@ func (p *Pipeline) execute(ctx context.Context) {
 		p.markAsFailed()
 		p.metrics.RecordPipelineFailure(p.config.Name, duration, fmt.Errorf("transformation failed: %w", err))
 		return
+	}
+
+	// Write transform debug output with pipeline name if enabled
+	if p.shouldWriteTransformDebugOutput() {
+		if err := p.writeTransformDebugOutput(extractResults, transformResults); err != nil {
+			fmt.Printf("Failed to write transform debug output: %v\n", err)
+		}
 	}
 
 	// Load

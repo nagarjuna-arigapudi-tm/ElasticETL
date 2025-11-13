@@ -40,7 +40,7 @@ type ExtractConfig struct {
 	StartTime         string                  `json:"start_time,omitempty" yaml:"start_time,omitempty"`
 	EndTime           string                  `json:"end_time,omitempty" yaml:"end_time,omitempty"`
 	InsecureTLS       bool                    `json:"insecure_tls,omitempty" yaml:"insecure_tls,omitempty"`
-	Debug             DebugConfig             `json:"debug,omitempty" yaml:"debug,omitempty"`
+	Debug             ExtractDebugConfig      `json:"debug,omitempty" yaml:"debug,omitempty"`
 }
 
 // ExtractBasicAuthConfig defines basic authentication configuration for extraction
@@ -74,6 +74,7 @@ type TransformConfig struct {
 	PreviousResultsSets    int                        `json:"previous_results_sets" yaml:"previous_results_sets"`
 	ConversionFunctions    []ConversionFunctionConfig `json:"conversion_functions" yaml:"conversion_functions"`
 	OutputFormat           string                     `json:"output_format,omitempty" yaml:"output_format,omitempty"` // csv, json (default: json)
+	Debug                  TransformDebugConfig       `json:"debug,omitempty" yaml:"debug,omitempty"`
 }
 
 // TransformInputConfig defines input format configuration for transformation
@@ -151,6 +152,22 @@ type LoggingConfig struct {
 type DebugConfig struct {
 	Enabled bool   `json:"enabled" yaml:"enabled"`
 	Path    string `json:"path,omitempty" yaml:"path,omitempty"`
+}
+
+// ExtractDebugConfig defines detailed debug settings for extraction phase
+type ExtractDebugConfig struct {
+	Path        string `json:"path,omitempty" yaml:"path,omitempty"` // Default: "debug"
+	FinalQuery  bool   `json:"final_query,omitempty" yaml:"final_query,omitempty"`
+	APIResponse bool   `json:"api_response,omitempty" yaml:"api_response,omitempty"`
+	FinalOutput bool   `json:"final_output,omitempty" yaml:"final_output,omitempty"`
+}
+
+// TransformDebugConfig defines detailed debug settings for transformation phase
+type TransformDebugConfig struct {
+	Path              string `json:"path,omitempty" yaml:"path,omitempty"` // Default: "debug"
+	Input             bool   `json:"input,omitempty" yaml:"input,omitempty"`
+	TransformedOutput bool   `json:"transformed_output,omitempty" yaml:"transformed_output,omitempty"`
+	FinalOutput       bool   `json:"final_output,omitempty" yaml:"final_output,omitempty"`
 }
 
 // DynamicLabelConfig defines how to create labels from CSV data

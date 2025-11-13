@@ -1,13 +1,17 @@
 package transform
 
 import (
+	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"reflect"
 	"regexp"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"elasticetl/pkg/config"
 	"elasticetl/pkg/extract"
@@ -67,6 +71,13 @@ func (t *Transformer) Transform(results []*extract.Result) ([]*TransformedResult
 	// Store results if not stateless
 	if !t.config.Stateless {
 		t.storePreviousResults(transformedResults)
+	}
+
+	// Debug output after transform phase if any debug option is enabled
+	if t.shouldWriteDebugOutput() {
+		if err := t.writeDebugOutput(results, transformedResults); err != nil {
+			fmt.Printf("Failed to write transform debug output: %v\n", err)
+		}
 	}
 
 	return transformedResults, nil
@@ -1066,6 +1077,223 @@ func (t *Transformer) formatValue(value interface{}) string {
 	default:
 		return fmt.Sprintf("%v", v)
 	}
+}
+
+// shouldWriteDebugOutput checks if any debug output should be written
+func (t *Transformer) shouldWriteDebugOutput() bool {
+	return t.config.Debug.Input || t.config.Debug.TransformedOutput || t.config.Debug.FinalOutput
+}
+
+// writeDebugOutput writes transformation debug information to file
+func (t *Transformer) writeDebugOutput(inputResults []*extract.Result, transformedResults []*TransformedResult) error {
+	// Get debug path, default to "debug" if not specified
+	debugPath := t.config.Debug.Path
+	if debugPath == "" {
+		debugPath = "debug"
+	}
+
+	// Create debug directory if it doesn't exist
+	if err := os.MkdirAll(debugPath, 0755); err != nil {
+		return fmt.Errorf("failed to create debug directory: %w", err)
+	}
+
+	// Create debug output with timestamp
+	debugData := map[string]interface{}{
+		"timestamp": time.Now().Format(time.RFC3339),
+		"stage":     "transform",
+	}
+
+	// Add debug information based on configuration
+	if t.config.Debug.Input {
+		// Include input data based on input format
+		inputData := make([]map[string]interface{}, 0, len(inputResults))
+		for _, result := range inputResults {
+			input := map[string]interface{}{
+				"source":    result.Source,
+				"timestamp": result.Timestamp,
+			}
+
+			if t.config.Input.Format == "csv" {
+				input["csv_data"] = result.CSVData
+			} else {
+				input["data"] = result.Data
+			}
+
+			inputData = append(inputData, input)
+		}
+		debugData["input"] = inputData
+	}
+
+	if t.config.Debug.TransformedOutput {
+		// Include transformed data (after null handling and conversions, before format change)
+		transformedData := make([]map[string]interface{}, 0, len(transformedResults))
+		for _, result := range transformedResults {
+			transformed := map[string]interface{}{
+				"source":    result.Source,
+				"timestamp": result.Timestamp,
+			}
+
+			if t.config.Input.Format == "csv" {
+				// For CSV input, show the processed CSV data before final output
+				transformed["transformed_csv_data"] = result.CSVData
+				if len(result.CSVHeaders) > 0 {
+					transformed["csv_headers"] = result.CSVHeaders
+				}
+			} else {
+				// For JSON input, show the transformed JSON data
+				transformed["transformed_data"] = result.TransformedData
+			}
+
+			transformedData = append(transformedData, transformed)
+		}
+		debugData["transformed_output"] = transformedData
+	}
+
+	if t.config.Debug.FinalOutput {
+		// Include final output data (what gets passed to load stage)
+		finalOutput := make([]map[string]interface{}, 0, len(transformedResults))
+		for _, result := range transformedResults {
+			output := map[string]interface{}{
+				"source":    result.Source,
+				"timestamp": result.Timestamp,
+			}
+
+			// Final output is always CSV format for now
+			output["csv_data"] = result.CSVData
+			if len(result.CSVHeaders) > 0 {
+				output["csv_headers"] = result.CSVHeaders
+			}
+
+			finalOutput = append(finalOutput, output)
+		}
+		debugData["final_output"] = finalOutput
+	}
+
+	// Marshal to JSON
+	jsonData, err := json.MarshalIndent(debugData, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal debug data: %w", err)
+	}
+
+	// Generate filename with pipeline name and timestamp
+	timestamp := time.Now().Format("20060102_150405")
+	// Note: Pipeline name will be passed from pipeline level, for now use "unknown"
+	filename := fmt.Sprintf("unknown_transform_%s.json", timestamp)
+	fullPath := filepath.Join(debugPath, filename)
+
+	// Write to file
+	if err := os.WriteFile(fullPath, jsonData, 0644); err != nil {
+		return fmt.Errorf("failed to write debug file: %w", err)
+	}
+
+	fmt.Printf("Transform debug output written to: %s\n", fullPath)
+	return nil
+}
+
+// WriteDebugOutputWithPipelineName writes transformation debug information to file with pipeline name
+func (t *Transformer) WriteDebugOutputWithPipelineName(inputResults []*extract.Result, transformedResults []*TransformedResult, pipelineName string) error {
+	// Get debug path, default to "debug" if not specified
+	debugPath := t.config.Debug.Path
+	if debugPath == "" {
+		debugPath = "debug"
+	}
+
+	// Create debug directory if it doesn't exist
+	if err := os.MkdirAll(debugPath, 0755); err != nil {
+		return fmt.Errorf("failed to create debug directory: %w", err)
+	}
+
+	// Create debug output with timestamp
+	debugData := map[string]interface{}{
+		"timestamp":     time.Now().Format(time.RFC3339),
+		"stage":         "transform",
+		"pipeline_name": pipelineName,
+	}
+
+	// Add debug information based on configuration
+	if t.config.Debug.Input {
+		// Include input data based on input format
+		inputData := make([]map[string]interface{}, 0, len(inputResults))
+		for _, result := range inputResults {
+			input := map[string]interface{}{
+				"source":    result.Source,
+				"timestamp": result.Timestamp,
+			}
+
+			if t.config.Input.Format == "csv" {
+				input["csv_data"] = result.CSVData
+			} else {
+				input["data"] = result.Data
+			}
+
+			inputData = append(inputData, input)
+		}
+		debugData["input"] = inputData
+	}
+
+	if t.config.Debug.TransformedOutput {
+		// Include transformed data (after null handling and conversions, before format change)
+		transformedData := make([]map[string]interface{}, 0, len(transformedResults))
+		for _, result := range transformedResults {
+			transformed := map[string]interface{}{
+				"source":    result.Source,
+				"timestamp": result.Timestamp,
+			}
+
+			if t.config.Input.Format == "csv" {
+				// For CSV input, show the processed CSV data before final output
+				transformed["transformed_csv_data"] = result.CSVData
+				if len(result.CSVHeaders) > 0 {
+					transformed["csv_headers"] = result.CSVHeaders
+				}
+			} else {
+				// For JSON input, show the transformed JSON data
+				transformed["transformed_data"] = result.TransformedData
+			}
+
+			transformedData = append(transformedData, transformed)
+		}
+		debugData["transformed_output"] = transformedData
+	}
+
+	if t.config.Debug.FinalOutput {
+		// Include final output data (what gets passed to load stage)
+		finalOutput := make([]map[string]interface{}, 0, len(transformedResults))
+		for _, result := range transformedResults {
+			output := map[string]interface{}{
+				"source":    result.Source,
+				"timestamp": result.Timestamp,
+			}
+
+			// Final output is always CSV format for now
+			output["csv_data"] = result.CSVData
+			if len(result.CSVHeaders) > 0 {
+				output["csv_headers"] = result.CSVHeaders
+			}
+
+			finalOutput = append(finalOutput, output)
+		}
+		debugData["final_output"] = finalOutput
+	}
+
+	// Marshal to JSON
+	jsonData, err := json.MarshalIndent(debugData, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal debug data: %w", err)
+	}
+
+	// Generate filename with pipeline name and timestamp
+	timestamp := time.Now().Format("20060102_150405")
+	filename := fmt.Sprintf("%s_transform_%s.json", pipelineName, timestamp)
+	fullPath := filepath.Join(debugPath, filename)
+
+	// Write to file
+	if err := os.WriteFile(fullPath, jsonData, 0644); err != nil {
+		return fmt.Errorf("failed to write debug file: %w", err)
+	}
+
+	fmt.Printf("Transform debug output written to: %s\n", fullPath)
+	return nil
 }
 
 // UpdateConfig updates the transformer configuration

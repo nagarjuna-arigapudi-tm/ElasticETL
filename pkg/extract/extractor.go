@@ -147,8 +147,8 @@ func (e *Extractor) Extract(ctx context.Context) ([]*Result, error) {
 		return nil, fmt.Errorf("all extractions failed: %v", errors)
 	}
 
-	// Debug output after extract phase if enabled
-	if e.config.Debug.Enabled && e.config.Debug.Path != "" {
+	// Debug output after extract phase if any debug option is enabled
+	if e.shouldWriteDebugOutput() {
 		if err := e.writeDebugOutput(results); err != nil {
 			fmt.Printf("Failed to write debug output: %v\n", err)
 		}
@@ -542,20 +542,68 @@ func (e *Extractor) UpdateConfig(cfg config.ExtractConfig) {
 	e.macroSubstituter = utils.NewMacroSubstituter(cfg.StartTime, cfg.EndTime)
 }
 
-// writeDebugOutput writes extraction results to debug file
+// shouldWriteDebugOutput checks if any debug output should be written
+func (e *Extractor) shouldWriteDebugOutput() bool {
+	return e.config.Debug.FinalQuery || e.config.Debug.APIResponse || e.config.Debug.FinalOutput
+}
+
+// writeDebugOutput writes extraction results to debug file with pipeline name
 func (e *Extractor) writeDebugOutput(results []*Result) error {
+	// Get debug path, default to "debug" if not specified
+	debugPath := e.config.Debug.Path
+	if debugPath == "" {
+		debugPath = "debug"
+	}
+
 	// Create debug directory if it doesn't exist
-	debugDir := filepath.Dir(e.config.Debug.Path)
-	if err := os.MkdirAll(debugDir, 0755); err != nil {
+	if err := os.MkdirAll(debugPath, 0755); err != nil {
 		return fmt.Errorf("failed to create debug directory: %w", err)
 	}
 
 	// Create debug output with timestamp
 	debugData := map[string]interface{}{
-		"timestamp":     time.Now().Format(time.RFC3339),
-		"pipeline":      "extract",
-		"results_count": len(results),
-		"results":       results,
+		"timestamp": time.Now().Format(time.RFC3339),
+		"stage":     "extract",
+	}
+
+	// Add debug information based on configuration
+	if e.config.Debug.FinalQuery {
+		debugData["final_query"] = e.config.Query
+	}
+
+	if e.config.Debug.APIResponse && len(results) > 0 {
+		// Include raw API responses (limited to avoid huge files)
+		apiResponses := make([]map[string]interface{}, 0, len(results))
+		for _, result := range results {
+			response := map[string]interface{}{
+				"source":        result.Source,
+				"timestamp":     result.Timestamp,
+				"metadata":      result.Metadata,
+				"response_size": result.Metadata["response_size"],
+			}
+			apiResponses = append(apiResponses, response)
+		}
+		debugData["api_responses"] = apiResponses
+	}
+
+	if e.config.Debug.FinalOutput {
+		// Include final output data
+		finalOutput := make([]map[string]interface{}, 0, len(results))
+		for _, result := range results {
+			output := map[string]interface{}{
+				"source":    result.Source,
+				"timestamp": result.Timestamp,
+			}
+
+			if e.config.OutputFormat == "csv" {
+				output["csv_data"] = result.CSVData
+			} else {
+				output["data"] = result.Data
+			}
+
+			finalOutput = append(finalOutput, output)
+		}
+		debugData["final_output"] = finalOutput
 	}
 
 	// Marshal to JSON
@@ -564,16 +612,97 @@ func (e *Extractor) writeDebugOutput(results []*Result) error {
 		return fmt.Errorf("failed to marshal debug data: %w", err)
 	}
 
-	// Generate filename with timestamp
+	// Generate filename with pipeline name and timestamp
 	timestamp := time.Now().Format("20060102_150405")
-	filename := fmt.Sprintf("%s_extract_%s.json", filepath.Base(e.config.Debug.Path), timestamp)
-	fullPath := filepath.Join(debugDir, filename)
+	// Note: Pipeline name will be passed from pipeline level, for now use "unknown"
+	filename := fmt.Sprintf("unknown_extract_%s.json", timestamp)
+	fullPath := filepath.Join(debugPath, filename)
 
 	// Write to file
 	if err := os.WriteFile(fullPath, jsonData, 0644); err != nil {
 		return fmt.Errorf("failed to write debug file: %w", err)
 	}
 
-	fmt.Printf("Debug output written to: %s\n", fullPath)
+	fmt.Printf("Extract debug output written to: %s\n", fullPath)
+	return nil
+}
+
+// WriteDebugOutputWithPipelineName writes extraction results to debug file with pipeline name
+func (e *Extractor) WriteDebugOutputWithPipelineName(results []*Result, pipelineName string) error {
+	// Get debug path, default to "debug" if not specified
+	debugPath := e.config.Debug.Path
+	if debugPath == "" {
+		debugPath = "debug"
+	}
+
+	// Create debug directory if it doesn't exist
+	if err := os.MkdirAll(debugPath, 0755); err != nil {
+		return fmt.Errorf("failed to create debug directory: %w", err)
+	}
+
+	// Create debug output with timestamp
+	debugData := map[string]interface{}{
+		"timestamp":     time.Now().Format(time.RFC3339),
+		"stage":         "extract",
+		"pipeline_name": pipelineName,
+	}
+
+	// Add debug information based on configuration
+	if e.config.Debug.FinalQuery {
+		debugData["final_query"] = e.config.Query
+	}
+
+	if e.config.Debug.APIResponse && len(results) > 0 {
+		// Include raw API responses (limited to avoid huge files)
+		apiResponses := make([]map[string]interface{}, 0, len(results))
+		for _, result := range results {
+			response := map[string]interface{}{
+				"source":        result.Source,
+				"timestamp":     result.Timestamp,
+				"metadata":      result.Metadata,
+				"response_size": result.Metadata["response_size"],
+			}
+			apiResponses = append(apiResponses, response)
+		}
+		debugData["api_responses"] = apiResponses
+	}
+
+	if e.config.Debug.FinalOutput {
+		// Include final output data
+		finalOutput := make([]map[string]interface{}, 0, len(results))
+		for _, result := range results {
+			output := map[string]interface{}{
+				"source":    result.Source,
+				"timestamp": result.Timestamp,
+			}
+
+			if e.config.OutputFormat == "csv" {
+				output["csv_data"] = result.CSVData
+			} else {
+				output["data"] = result.Data
+			}
+
+			finalOutput = append(finalOutput, output)
+		}
+		debugData["final_output"] = finalOutput
+	}
+
+	// Marshal to JSON
+	jsonData, err := json.MarshalIndent(debugData, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal debug data: %w", err)
+	}
+
+	// Generate filename with pipeline name and timestamp
+	timestamp := time.Now().Format("20060102_150405")
+	filename := fmt.Sprintf("%s_extract_%s.json", pipelineName, timestamp)
+	fullPath := filepath.Join(debugPath, filename)
+
+	// Write to file
+	if err := os.WriteFile(fullPath, jsonData, 0644); err != nil {
+		return fmt.Errorf("failed to write debug file: %w", err)
+	}
+
+	fmt.Printf("Extract debug output written to: %s\n", fullPath)
 	return nil
 }

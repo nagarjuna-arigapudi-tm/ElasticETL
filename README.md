@@ -265,9 +265,22 @@ spec:
 
 ## Documentation
 
-- **[Configuration Guide](CONFIGURATION_GUIDE.md)** - Comprehensive configuration documentation
-- **[Technical Specification](TECHNICAL_SPECIFICATION.md)** - Detailed technical specifications
-- **Configuration Examples** - Available in `configs/` and `examples/` directories
+### Comprehensive Documentation
+- **[Consolidated README](CONSOLIDATED_README.md)** - Complete user guide with all features and examples
+- **[Technical Specification](CONSOLIDATED_TECHNICAL_SPECIFICATION.md)** - Detailed technical architecture and implementation
+- **[Functional Specification](CONSOLIDATED_FUNCTIONAL_SPECIFICATION.md)** - Complete functional requirements and use cases
+
+### Specialized Guides
+- **[Configuration Guide](CONFIGURATION_GUIDE.md)** - Configuration file reference and examples
+- **[Pipeline Resilience Guide](PIPELINE_RESILIENCE_GUIDE.md)** - Retry mechanisms and failure handling
+- **[Prometheus Metrics Guide](PROMETHEUS_METRICS_GUIDE.md)** - CSV-based time series generation
+- **[Basic Auth Guide](BASIC_AUTH_GUIDE.md)** - Authentication configuration
+- **[CSV Format Guide](CSV_FORMAT_GUIDE.md)** - CSV processing and transformation
+- **[Endpoint Types Guide](ENDPOINT_TYPES_GUIDE.md)** - Different endpoint type support
+
+### Configuration Examples
+- **`configs/`** - Production-ready configuration examples
+- **`examples/`** - Learning and development configurations
 
 ## Architecture
 

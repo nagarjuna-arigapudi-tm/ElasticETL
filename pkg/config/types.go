@@ -105,11 +105,13 @@ type LoadConfig struct {
 
 // StreamConfig defines a single load stream
 type StreamConfig struct {
-	Type        string                 `json:"type" yaml:"type"` // gem, otel, prometheus, debug, csv
+	Name        string                 `json:"name,omitempty" yaml:"name,omitempty"` // Optional stream name for identification
+	Type        string                 `json:"type" yaml:"type"`                     // gem, otel, prometheus, debug, csv
 	Config      map[string]interface{} `json:"config" yaml:"config"`
 	BasicAuth   *BasicAuthConfig       `json:"basic_auth,omitempty" yaml:"basic_auth,omitempty"`
 	InsecureTLS bool                   `json:"insecure_tls,omitempty" yaml:"insecure_tls,omitempty"`
 	Labels      map[string]string      `json:"labels,omitempty" yaml:"labels,omitempty"`
+	Debug       *LoadDebugConfig       `json:"debug,omitempty" yaml:"debug,omitempty"` // Per-stream debug configuration
 }
 
 // BasicAuthConfig defines basic authentication configuration

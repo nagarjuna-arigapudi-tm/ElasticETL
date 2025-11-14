@@ -162,11 +162,19 @@ func NewLoader(cfg config.LoadConfig) (*Loader, error) {
 }
 
 // Load loads data to all configured streams
-func (l *Loader) Load(ctx context.Context, results []*transform.TransformedResult) error {
+func (l *Loader) Load(ctx context.Context, results []*transform.TransformedResult, pipelineName string) error {
 	l.mutex.RLock()
 	streams := make([]Stream, len(l.streams))
 	copy(streams, l.streams)
+	debugConfig := l.config.Debug
 	l.mutex.RUnlock()
+
+	// Write debug information if enabled
+	if debugConfig.Input || debugConfig.APICall || debugConfig.APIResponse {
+		if err := l.writeLoadDebugInfo(results, pipelineName, debugConfig); err != nil {
+			fmt.Printf("Warning: Failed to write load debug info: %v\n", err)
+		}
+	}
 
 	var wg sync.WaitGroup
 	errorsChan := make(chan error, len(streams))
@@ -176,7 +184,7 @@ func (l *Loader) Load(ctx context.Context, results []*transform.TransformedResul
 		wg.Add(1)
 		go func(s Stream) {
 			defer wg.Done()
-			if err := s.Load(ctx, results); err != nil {
+			if err := l.loadWithDebug(ctx, results, s, pipelineName, debugConfig); err != nil {
 				errorsChan <- fmt.Errorf("stream %s: %w", s.GetType(), err)
 			}
 		}(stream)
@@ -1698,4 +1706,238 @@ func (p *PrometheusRemoteWriteStream) Close() error {
 // GetType returns the stream type
 func (p *PrometheusRemoteWriteStream) GetType() string {
 	return "prometheus_remote_write"
+}
+
+// writeLoadDebugInfo writes debug information for the load stage
+func (l *Loader) writeLoadDebugInfo(results []*transform.TransformedResult, pipelineName string, debugConfig config.LoadDebugConfig) error {
+	// Set default path if not specified
+	debugPath := debugConfig.Path
+	if debugPath == "" {
+		debugPath = "debug"
+	}
+
+	// Create debug directory if it doesn't exist
+	if err := os.MkdirAll(debugPath, 0755); err != nil {
+		return fmt.Errorf("failed to create debug directory: %w", err)
+	}
+
+	timestamp := time.Now().Format("20060102_150405")
+
+	// Write input debug info if enabled
+	if debugConfig.Input {
+		inputData := map[string]interface{}{
+			"timestamp":     time.Now().Format(time.RFC3339),
+			"pipeline":      pipelineName,
+			"stage":         "load",
+			"type":          "input",
+			"results_count": len(results),
+			"results":       results,
+		}
+
+		inputJSON, err := json.MarshalIndent(inputData, "", "  ")
+		if err != nil {
+			return fmt.Errorf("failed to marshal input debug data: %w", err)
+		}
+
+		inputFile := filepath.Join(debugPath, fmt.Sprintf("%s_load_input_%s.json", pipelineName, timestamp))
+		if err := os.WriteFile(inputFile, inputJSON, 0644); err != nil {
+			return fmt.Errorf("failed to write input debug file: %w", err)
+		}
+
+		fmt.Printf("Load input debug info written to: %s\n", inputFile)
+	}
+
+	return nil
+}
+
+// loadWithDebug loads data to a stream with debug information
+func (l *Loader) loadWithDebug(ctx context.Context, results []*transform.TransformedResult, stream Stream, pipelineName string, debugConfig config.LoadDebugConfig) error {
+	// Set default path if not specified
+	debugPath := debugConfig.Path
+	if debugPath == "" {
+		debugPath = "debug"
+	}
+
+	timestamp := time.Now().Format("20060102_150405")
+
+	// Write API call debug info if enabled
+	if debugConfig.APICall {
+		if err := l.writeAPICallDebugInfo(stream, results, pipelineName, debugPath, timestamp); err != nil {
+			fmt.Printf("Warning: Failed to write API call debug info: %v\n", err)
+		}
+	}
+
+	// Perform the actual load
+	err := stream.Load(ctx, results)
+
+	// Write API response debug info if enabled
+	if debugConfig.APIResponse {
+		if err := l.writeAPIResponseDebugInfo(stream, err, pipelineName, debugPath, timestamp); err != nil {
+			fmt.Printf("Warning: Failed to write API response debug info: %v\n", err)
+		}
+	}
+
+	return err
+}
+
+// writeAPICallDebugInfo writes debug information about API calls
+func (l *Loader) writeAPICallDebugInfo(stream Stream, results []*transform.TransformedResult, pipelineName, debugPath, timestamp string) error {
+	// Create debug directory if it doesn't exist
+	if err := os.MkdirAll(debugPath, 0755); err != nil {
+		return fmt.Errorf("failed to create debug directory: %w", err)
+	}
+
+	apiCallData := map[string]interface{}{
+		"timestamp":     time.Now().Format(time.RFC3339),
+		"pipeline":      pipelineName,
+		"stage":         "load",
+		"type":          "api_call",
+		"stream_type":   stream.GetType(),
+		"results_count": len(results),
+	}
+
+	// Add stream-specific debug information
+	switch s := stream.(type) {
+	case *GEMStream:
+		apiCallData["endpoint"] = s.endpoint
+		apiCallData["headers"] = map[string]string{
+			"Content-Type":                      "application/json",
+			"X-Prometheus-Remote-Write-Version": "0.1.0",
+		}
+		apiCallData["method"] = "POST"
+		apiCallData["insecure_tls"] = false // GEM stream doesn't expose this directly
+
+		// Generate equivalent curl command
+		curlCmd := fmt.Sprintf("curl -X POST '%s' \\\n", s.endpoint)
+		curlCmd += "  -H 'Content-Type: application/json' \\\n"
+		curlCmd += "  -H 'X-Prometheus-Remote-Write-Version: 0.1.0' \\\n"
+		curlCmd += "  -d '<JSON_DATA>'"
+		apiCallData["curl_equivalent"] = curlCmd
+
+	case *OTELStream:
+		apiCallData["endpoint"] = s.endpoint
+		apiCallData["headers"] = map[string]string{
+			"Content-Type": "application/json",
+		}
+		apiCallData["method"] = "POST"
+
+		// Generate equivalent curl command
+		curlCmd := fmt.Sprintf("curl -X POST '%s' \\\n", s.endpoint)
+		curlCmd += "  -H 'Content-Type: application/json' \\\n"
+		curlCmd += "  -d '<JSON_DATA>'"
+		apiCallData["curl_equivalent"] = curlCmd
+
+	case *PrometheusStream:
+		apiCallData["endpoint"] = s.endpoint
+		headers := map[string]string{
+			"Content-Type": "text/plain",
+		}
+		if s.basicAuth != "" {
+			headers["Authorization"] = "Basic <ENCODED_CREDENTIALS>"
+		}
+		apiCallData["headers"] = headers
+		apiCallData["method"] = "POST"
+
+		// Generate equivalent curl command
+		curlCmd := fmt.Sprintf("curl -X POST '%s' \\\n", s.endpoint)
+		curlCmd += "  -H 'Content-Type: text/plain' \\\n"
+		if s.basicAuth != "" {
+			curlCmd += "  -H 'Authorization: Basic <ENCODED_CREDENTIALS>' \\\n"
+		}
+		curlCmd += "  -d '<PROMETHEUS_DATA>'"
+		apiCallData["curl_equivalent"] = curlCmd
+
+	case *PrometheusRemoteWriteStream:
+		apiCallData["endpoint"] = s.endpoint
+		headers := map[string]string{
+			"Content-Type":                      "application/x-protobuf",
+			"Content-Encoding":                  "snappy",
+			"X-Prometheus-Remote-Write-Version": "0.1.0",
+		}
+		if s.basicAuth != "" {
+			headers["Authorization"] = "Basic <ENCODED_CREDENTIALS>"
+		}
+		apiCallData["headers"] = headers
+		apiCallData["method"] = "POST"
+
+		// Generate equivalent curl command
+		curlCmd := fmt.Sprintf("curl -X POST '%s' \\\n", s.endpoint)
+		curlCmd += "  -H 'Content-Type: application/x-protobuf' \\\n"
+		curlCmd += "  -H 'Content-Encoding: snappy' \\\n"
+		curlCmd += "  -H 'X-Prometheus-Remote-Write-Version: 0.1.0' \\\n"
+		if s.basicAuth != "" {
+			curlCmd += "  -H 'Authorization: Basic <ENCODED_CREDENTIALS>' \\\n"
+		}
+		curlCmd += "  --data-binary '<PROTOBUF_DATA>'"
+		apiCallData["curl_equivalent"] = curlCmd
+
+	default:
+		apiCallData["note"] = "Stream type does not make HTTP API calls"
+	}
+
+	apiCallJSON, err := json.MarshalIndent(apiCallData, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal API call debug data: %w", err)
+	}
+
+	apiCallFile := filepath.Join(debugPath, fmt.Sprintf("%s_load_api_call_%s.json", pipelineName, timestamp))
+	if err := os.WriteFile(apiCallFile, apiCallJSON, 0644); err != nil {
+		return fmt.Errorf("failed to write API call debug file: %w", err)
+	}
+
+	fmt.Printf("Load API call debug info written to: %s\n", apiCallFile)
+	return nil
+}
+
+// writeAPIResponseDebugInfo writes debug information about API responses
+func (l *Loader) writeAPIResponseDebugInfo(stream Stream, loadErr error, pipelineName, debugPath, timestamp string) error {
+	// Create debug directory if it doesn't exist
+	if err := os.MkdirAll(debugPath, 0755); err != nil {
+		return fmt.Errorf("failed to create debug directory: %w", err)
+	}
+
+	apiResponseData := map[string]interface{}{
+		"timestamp":   time.Now().Format(time.RFC3339),
+		"pipeline":    pipelineName,
+		"stage":       "load",
+		"type":        "api_response",
+		"stream_type": stream.GetType(),
+		"success":     loadErr == nil,
+	}
+
+	if loadErr != nil {
+		apiResponseData["error"] = loadErr.Error()
+		apiResponseData["status"] = "error"
+	} else {
+		apiResponseData["status"] = "success"
+	}
+
+	// Add stream-specific response information
+	switch stream.GetType() {
+	case "gem", "otel", "prometheus", "prometheus_remote_write":
+		if loadErr != nil {
+			// Try to extract HTTP status code from error message
+			errorMsg := loadErr.Error()
+			if strings.Contains(errorMsg, "returned status") {
+				apiResponseData["http_status_extracted"] = errorMsg
+			}
+		} else {
+			apiResponseData["http_status"] = "2xx (success)"
+		}
+	case "debug", "csv":
+		apiResponseData["note"] = "File-based stream, no HTTP response"
+	}
+
+	apiResponseJSON, err := json.MarshalIndent(apiResponseData, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal API response debug data: %w", err)
+	}
+
+	apiResponseFile := filepath.Join(debugPath, fmt.Sprintf("%s_load_api_response_%s.json", pipelineName, timestamp))
+	if err := os.WriteFile(apiResponseFile, apiResponseJSON, 0644); err != nil {
+		return fmt.Errorf("failed to write API response debug file: %w", err)
+	}
+
+	fmt.Printf("Load API response debug info written to: %s\n", apiResponseFile)
+	return nil
 }

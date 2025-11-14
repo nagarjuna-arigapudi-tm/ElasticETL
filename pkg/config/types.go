@@ -100,6 +100,7 @@ type LoadConfig struct {
 	Metrics      []PrometheusMetricConfig `json:"metrics,omitempty" yaml:"metrics,omitempty"` // Metrics configuration for all streams
 	Streams      []StreamConfig           `json:"streams" yaml:"streams"`
 	LabelColumns []string                 `json:"label_columns,omitempty" yaml:"label_columns,omitempty"` // Columns to use as labels
+	Debug        LoadDebugConfig          `json:"debug,omitempty" yaml:"debug,omitempty"`
 }
 
 // StreamConfig defines a single load stream
@@ -168,6 +169,14 @@ type TransformDebugConfig struct {
 	Input             bool   `json:"input,omitempty" yaml:"input,omitempty"`
 	TransformedOutput bool   `json:"transformed_output,omitempty" yaml:"transformed_output,omitempty"`
 	FinalOutput       bool   `json:"final_output,omitempty" yaml:"final_output,omitempty"`
+}
+
+// LoadDebugConfig defines detailed debug settings for load phase
+type LoadDebugConfig struct {
+	Path        string `json:"path,omitempty" yaml:"path,omitempty"` // Default: "debug"
+	Input       bool   `json:"input,omitempty" yaml:"input,omitempty"`
+	APICall     bool   `json:"api_call,omitempty" yaml:"api_call,omitempty"`
+	APIResponse bool   `json:"api_response,omitempty" yaml:"api_response,omitempty"`
 }
 
 // DynamicLabelConfig defines how to create labels from CSV data

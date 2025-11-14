@@ -526,7 +526,7 @@ func (t *Transformer) analyzeUniqueKeys(results []*TransformedResult) []string {
 		keyILower := strings.ToLower(keyI)
 		keyJLower := strings.ToLower(keyJ)
 
-		// Check if key name is "key" (case insensitive)
+		// Check if key name is "key" (case insensitive) - check both full name and suffix
 		isKeyI := keyILower == "key" || strings.HasSuffix(keyILower, ".key")
 		isKeyJ := keyJLower == "key" || strings.HasSuffix(keyJLower, ".key")
 

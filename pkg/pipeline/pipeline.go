@@ -250,7 +250,7 @@ func (p *Pipeline) execute(ctx context.Context) {
 	}
 
 	// Load
-	if err := p.loader.Load(ctx, transformResults); err != nil {
+	if err := p.loader.Load(ctx, transformResults, p.config.Name); err != nil {
 		duration := time.Since(startTime)
 		p.markAsFailed()
 		p.metrics.RecordPipelineFailure(p.config.Name, duration, fmt.Errorf("loading failed: %w", err))

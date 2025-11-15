@@ -962,9 +962,10 @@ func (p *PrometheusStream) GetType() string {
 
 // DebugStream handles loading to debug files
 type DebugStream struct {
-	path    string
-	format  string // "json", "prometheus", "otel"
-	metrics []config.PrometheusMetricConfig
+	path         string
+	format       string // "json", "prometheus", "otel"
+	metrics      []config.PrometheusMetricConfig
+	pipelineName string // Store pipeline name for filename generation
 }
 
 // NewDebugStream creates a new debug stream
@@ -984,6 +985,11 @@ func NewDebugStream(config map[string]interface{}, metrics []config.PrometheusMe
 		format:  format,
 		metrics: metrics,
 	}, nil
+}
+
+// SetPipelineName sets the pipeline name for filename generation
+func (d *DebugStream) SetPipelineName(pipelineName string) {
+	d.pipelineName = pipelineName
 }
 
 // Load loads data to debug file
@@ -1014,9 +1020,13 @@ func (d *DebugStream) Load(ctx context.Context, results []*transform.Transformed
 		return fmt.Errorf("failed to generate debug output: %w", err)
 	}
 
-	// Generate filename with timestamp
+	// Generate filename with timestamp and pipeline name
 	timestamp := time.Now().Format("20060102_150405")
-	filename := fmt.Sprintf("%s_load_%s.%s", filepath.Base(d.path), timestamp, fileExtension)
+	pipelineName := d.pipelineName
+	if pipelineName == "" {
+		pipelineName = "unknown"
+	}
+	filename := fmt.Sprintf("%s_load_%s.%s", pipelineName, timestamp, fileExtension)
 	fullPath := filepath.Join(debugDir, filename)
 
 	// Write to file
@@ -1785,6 +1795,11 @@ func (l *Loader) loadWithStreamDebug(ctx context.Context, results []*transform.T
 		if err := l.writeStreamAPICallDebugInfo(stream, results, pipelineName, streamName, debugPath, timestamp); err != nil {
 			fmt.Printf("Warning: Failed to write API call debug info: %v\n", err)
 		}
+	}
+
+	// Set pipeline name for DebugStream if applicable
+	if debugStream, ok := stream.(*DebugStream); ok {
+		debugStream.SetPipelineName(pipelineName)
 	}
 
 	// Perform the actual load

@@ -149,7 +149,7 @@ func (e *Extractor) Extract(ctx context.Context) ([]*Result, error) {
 
 	// Debug output after extract phase if any debug option is enabled
 	if e.shouldWriteDebugOutput() {
-		if err := e.writeDebugOutput(results); err != nil {
+		if err := e.writeDebugOutput(results, "unknown"); err != nil {
 			fmt.Printf("Failed to write debug output: %v\n", err)
 		}
 	}
@@ -548,7 +548,7 @@ func (e *Extractor) shouldWriteDebugOutput() bool {
 }
 
 // writeDebugOutput writes extraction results to debug file with pipeline name
-func (e *Extractor) writeDebugOutput(results []*Result) error {
+func (e *Extractor) writeDebugOutput(results []*Result, pipelineName string) error {
 	// Get debug path, default to "debug" if not specified
 	debugPath := e.config.Debug.Path
 	if debugPath == "" {
@@ -562,8 +562,9 @@ func (e *Extractor) writeDebugOutput(results []*Result) error {
 
 	// Create debug output with timestamp
 	debugData := map[string]interface{}{
-		"timestamp": time.Now().Format(time.RFC3339),
-		"stage":     "extract",
+		"timestamp":     time.Now().Format(time.RFC3339),
+		"stage":         "extract",
+		"pipeline_name": pipelineName,
 	}
 
 	// Add debug information based on configuration
@@ -614,8 +615,7 @@ func (e *Extractor) writeDebugOutput(results []*Result) error {
 
 	// Generate filename with pipeline name and timestamp
 	timestamp := time.Now().Format("20060102_150405")
-	// Note: Pipeline name will be passed from pipeline level, for now use "unknown"
-	filename := fmt.Sprintf("unknown_extract_%s.json", timestamp)
+	filename := fmt.Sprintf("%s_extract_%s.json", pipelineName, timestamp)
 	fullPath := filepath.Join(debugPath, filename)
 
 	// Write to file

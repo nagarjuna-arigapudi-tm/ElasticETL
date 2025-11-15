@@ -229,7 +229,7 @@ func (p *Pipeline) execute(ctx context.Context) {
 		// No data extracted, but not an error - clear failure state
 		duration := time.Since(startTime)
 		p.markAsSuccessful()
-		p.metrics.RecordPipelineSuccess(p.config.Name, duration, 0, 0)
+		p.metrics.RecordPipelineZeroData(p.config.Name, duration)
 		return
 	}
 
@@ -249,6 +249,16 @@ func (p *Pipeline) execute(ctx context.Context) {
 		}
 	}
 
+	// Check if we have any actual data to load (CSV data)
+	hasData := p.hasDataToLoad(transformResults)
+	if !hasData {
+		// No CSV data to load, but transformation was successful - record as zero data run
+		duration := time.Since(startTime)
+		p.markAsSuccessful()
+		p.metrics.RecordPipelineZeroData(p.config.Name, duration)
+		return
+	}
+
 	// Load
 	if err := p.loader.Load(ctx, transformResults, p.config.Name); err != nil {
 		duration := time.Since(startTime)
@@ -264,6 +274,16 @@ func (p *Pipeline) execute(ctx context.Context) {
 
 	p.markAsSuccessful()
 	p.metrics.RecordPipelineSuccess(p.config.Name, duration, entriesProcessed, bytesProcessed)
+}
+
+// hasDataToLoad checks if there is any CSV data to load
+func (p *Pipeline) hasDataToLoad(results []*transform.TransformedResult) bool {
+	for _, result := range results {
+		if len(result.CSVData) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // calculateBytesProcessed estimates the number of bytes processed

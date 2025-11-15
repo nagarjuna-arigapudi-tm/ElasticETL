@@ -14,22 +14,23 @@ import (
 
 // PipelineMetrics represents metrics for a single pipeline
 type PipelineMetrics struct {
-	Name               string        `json:"name"`
-	Enabled            bool          `json:"enabled"`
-	LastRun            time.Time     `json:"last_run"`
-	LastDuration       time.Duration `json:"last_duration"`
-	TotalRuns          int64         `json:"total_runs"`
-	SuccessfulRuns     int64         `json:"successful_runs"`
-	FailedRuns         int64         `json:"failed_runs"`
-	EntriesProcessed   int64         `json:"entries_processed"`
-	BytesProcessed     int64         `json:"bytes_processed"`
-	MemoryUsageMB      float64       `json:"memory_usage_mb"`
-	CPUUsagePercent    float64       `json:"cpu_usage_percent"`
-	ActiveGoroutines   int           `json:"active_goroutines"`
-	ErrorRate          float64       `json:"error_rate"`
-	AverageProcessTime time.Duration `json:"average_process_time"`
-	LastError          string        `json:"last_error,omitempty"`
-	LastErrorTime      time.Time     `json:"last_error_time,omitempty"`
+	Name               string    `json:"name"`
+	Enabled            bool      `json:"enabled"`
+	LastRun            time.Time `json:"last_run"`
+	LastDuration       float64   `json:"last_duration"` // in seconds
+	TotalRuns          int64     `json:"total_runs"`
+	SuccessfulRuns     int64     `json:"successful_runs"`
+	FailedRuns         int64     `json:"failed_runs"`
+	ZeroDataRuns       int64     `json:"zero_data_runs"` // new metric for runs with no data
+	EntriesProcessed   int64     `json:"entries_processed"`
+	BytesProcessed     int64     `json:"bytes_processed"`
+	MemoryUsageMB      float64   `json:"memory_usage_mb"`
+	CPUUsagePercent    float64   `json:"cpu_usage_percent"`
+	ActiveGoroutines   int       `json:"active_goroutines"`
+	ErrorRate          float64   `json:"error_rate"`
+	AverageProcessTime float64   `json:"average_process_time"` // in seconds
+	LastError          string    `json:"last_error,omitempty"`
+	LastErrorTime      time.Time `json:"last_error_time,omitempty"`
 }
 
 // SystemMetrics represents overall system metrics
@@ -107,17 +108,18 @@ func (c *Collector) RecordPipelineSuccess(pipelineName string, duration time.Dur
 		return
 	}
 
-	metrics.LastDuration = duration
+	durationSeconds := duration.Seconds()
+	metrics.LastDuration = durationSeconds
 	metrics.SuccessfulRuns++
 	metrics.EntriesProcessed += entriesProcessed
 	metrics.BytesProcessed += bytesProcessed
 
-	// Calculate average process time
+	// Calculate average process time in seconds
 	if metrics.SuccessfulRuns > 0 {
-		totalTime := time.Duration(metrics.SuccessfulRuns)*metrics.AverageProcessTime + duration
-		metrics.AverageProcessTime = totalTime / time.Duration(metrics.SuccessfulRuns)
+		totalTime := float64(metrics.SuccessfulRuns-1)*metrics.AverageProcessTime + durationSeconds
+		metrics.AverageProcessTime = totalTime / float64(metrics.SuccessfulRuns)
 	} else {
-		metrics.AverageProcessTime = duration
+		metrics.AverageProcessTime = durationSeconds
 	}
 
 	// Calculate error rate
@@ -140,10 +142,43 @@ func (c *Collector) RecordPipelineFailure(pipelineName string, duration time.Dur
 		return
 	}
 
-	metrics.LastDuration = duration
+	metrics.LastDuration = duration.Seconds()
 	metrics.FailedRuns++
 	metrics.LastError = err.Error()
 	metrics.LastErrorTime = time.Now()
+
+	// Calculate error rate
+	if metrics.TotalRuns > 0 {
+		metrics.ErrorRate = float64(metrics.FailedRuns) / float64(metrics.TotalRuns) * 100
+	}
+}
+
+// RecordPipelineZeroData records a pipeline execution with no data to process
+func (c *Collector) RecordPipelineZeroData(pipelineName string, duration time.Duration) {
+	if !c.config.Enabled {
+		return
+	}
+
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+
+	metrics, exists := c.pipelineMetrics[pipelineName]
+	if !exists {
+		return
+	}
+
+	durationSeconds := duration.Seconds()
+	metrics.LastDuration = durationSeconds
+	metrics.SuccessfulRuns++
+	metrics.ZeroDataRuns++
+
+	// Calculate average process time in seconds
+	if metrics.SuccessfulRuns > 0 {
+		totalTime := float64(metrics.SuccessfulRuns-1)*metrics.AverageProcessTime + durationSeconds
+		metrics.AverageProcessTime = totalTime / float64(metrics.SuccessfulRuns)
+	} else {
+		metrics.AverageProcessTime = durationSeconds
+	}
 
 	// Calculate error rate
 	if metrics.TotalRuns > 0 {

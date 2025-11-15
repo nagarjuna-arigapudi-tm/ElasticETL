@@ -129,6 +129,16 @@ func safeMapStringInterface(value interface{}) (map[string]interface{}, bool) {
 	}
 }
 
+// hasCSVData checks if any of the transformed results contain CSV data
+func hasCSVData(results []*transform.TransformedResult) bool {
+	for _, result := range results {
+		if len(result.CSVData) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
 // Loader handles data loading to various destinations
 type Loader struct {
 	config        config.LoadConfig
@@ -328,6 +338,11 @@ func NewGEMStream(config map[string]interface{}, labels map[string]string, insec
 
 // Load loads data to GEM
 func (g *GEMStream) Load(ctx context.Context, results []*transform.TransformedResult) error {
+	// Check if there's any CSV data to load
+	if !hasCSVData(results) {
+		return nil // Skip API call when no data to load
+	}
+
 	// Convert results to Prometheus remote write format
 	samples := g.convertToPrometheusSamples(results)
 	if len(samples) == 0 {
@@ -592,6 +607,11 @@ func NewOTELStream(config map[string]interface{}, labels map[string]string, inse
 
 // Load loads data to OTEL collector
 func (o *OTELStream) Load(ctx context.Context, results []*transform.TransformedResult) error {
+	// Check if there's any CSV data to load
+	if !hasCSVData(results) {
+		return nil // Skip API call when no data to load
+	}
+
 	// Convert results to OTEL format
 	otelData := o.convertToOTELFormat(results)
 
@@ -803,6 +823,11 @@ func NewPrometheusStream(config map[string]interface{}, labels map[string]string
 
 // Load loads data to Prometheus
 func (p *PrometheusStream) Load(ctx context.Context, results []*transform.TransformedResult) error {
+	// Check if there's any CSV data to load
+	if !hasCSVData(results) {
+		return nil // Skip API call when no data to load
+	}
+
 	// Convert to Prometheus exposition format
 	metricsText := p.convertToPrometheusFormat(results)
 
@@ -1494,6 +1519,11 @@ func NewPrometheusRemoteWriteStream(config map[string]interface{}, labels map[st
 func (p *PrometheusRemoteWriteStream) Load(ctx context.Context, results []*transform.TransformedResult) error {
 	if len(results) == 0 {
 		return nil
+	}
+
+	// Check if there's any CSV data to load
+	if !hasCSVData(results) {
+		return nil // Skip API call when no data to load
 	}
 
 	// Convert results to Prometheus remote write format

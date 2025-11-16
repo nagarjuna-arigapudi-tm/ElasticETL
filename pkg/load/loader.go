@@ -349,41 +349,67 @@ func (g *GEMStream) Load(ctx context.Context, results []*transform.TransformedRe
 		return nil
 	}
 
-	// Create WriteRequest
-	writeRequest := &prompb.WriteRequest{}
-	for _, ts := range timeSeries {
-		writeRequest.Timeseries = append(writeRequest.Timeseries, *ts)
+	var errors []error
+	successCount := 0
+	totalCount := len(timeSeries)
+
+	// Send each time series individually to avoid 400 errors with multiple time series
+	for i, ts := range timeSeries {
+		// Create WriteRequest with single time series
+		writeRequest := &prompb.WriteRequest{
+			Timeseries: []prompb.TimeSeries{*ts},
+		}
+
+		// Marshal to protobuf
+		data, err := writeRequest.Marshal()
+		if err != nil {
+			errors = append(errors, fmt.Errorf("failed to marshal write request for time series %d: %w", i+1, err))
+			continue
+		}
+
+		// Compress with snappy
+		compressed := snappy.Encode(nil, data)
+
+		// Send to GEM endpoint
+		req, err := http.NewRequestWithContext(ctx, "POST", g.endpoint, bytes.NewReader(compressed))
+		if err != nil {
+			errors = append(errors, fmt.Errorf("failed to create request for time series %d: %w", i+1, err))
+			continue
+		}
+
+		req.Header.Set("Content-Type", "application/x-protobuf")
+		req.Header.Set("Content-Encoding", "snappy")
+		req.Header.Set("X-Prometheus-Remote-Write-Version", "0.1.0")
+
+		resp, err := g.httpClient.Do(req)
+		if err != nil {
+			errors = append(errors, fmt.Errorf("failed to send request for time series %d: %w", i+1, err))
+			continue
+		}
+
+		// Check response status
+		if resp.StatusCode >= 400 {
+			errors = append(errors, fmt.Errorf("time series %d: GEM returned status %d", i+1, resp.StatusCode))
+			resp.Body.Close()
+			continue
+		}
+
+		resp.Body.Close()
+		successCount++
 	}
 
-	// Marshal to protobuf
-	data, err := writeRequest.Marshal()
-	if err != nil {
-		return fmt.Errorf("failed to marshal write request: %w", err)
+	// Return consolidated result
+	if len(errors) > 0 {
+		if successCount == 0 {
+			// All failed
+			return fmt.Errorf("all %d time series failed to write: %v", totalCount, errors)
+		} else {
+			// Partial success
+			return fmt.Errorf("partial success: %d/%d time series written successfully, failures: %v", successCount, totalCount, errors)
+		}
 	}
 
-	// Compress with snappy
-	compressed := snappy.Encode(nil, data)
-
-	// Send to GEM endpoint
-	req, err := http.NewRequestWithContext(ctx, "POST", g.endpoint, bytes.NewReader(compressed))
-	if err != nil {
-		return fmt.Errorf("failed to create request: %w", err)
-	}
-
-	req.Header.Set("Content-Type", "application/x-protobuf")
-	req.Header.Set("Content-Encoding", "snappy")
-	req.Header.Set("X-Prometheus-Remote-Write-Version", "0.1.0")
-
-	resp, err := g.httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("failed to send request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode >= 400 {
-		return fmt.Errorf("GEM returned status %d", resp.StatusCode)
-	}
-
+	// All succeeded
 	return nil
 }
 
@@ -1706,48 +1732,78 @@ func (p *PrometheusRemoteWriteStream) Load(ctx context.Context, results []*trans
 
 // loadWithNative loads data using the native Prometheus remote write implementation
 func (p *PrometheusRemoteWriteStream) loadWithNative(ctx context.Context, timeSeries []*prompb.TimeSeries) error {
-	// Create WriteRequest
-	writeRequest := &prompb.WriteRequest{}
-	for _, ts := range timeSeries {
-		writeRequest.Timeseries = append(writeRequest.Timeseries, *ts)
+	if len(timeSeries) == 0 {
+		return nil
 	}
 
-	// Marshal to protobuf
-	data, err := writeRequest.Marshal()
-	if err != nil {
-		return fmt.Errorf("failed to marshal write request: %w", err)
+	var errors []error
+	successCount := 0
+	totalCount := len(timeSeries)
+
+	// Send each time series individually to avoid 400 errors with multiple time series
+	for i, ts := range timeSeries {
+		// Create WriteRequest with single time series
+		writeRequest := &prompb.WriteRequest{
+			Timeseries: []prompb.TimeSeries{*ts},
+		}
+
+		// Marshal to protobuf
+		data, err := writeRequest.Marshal()
+		if err != nil {
+			errors = append(errors, fmt.Errorf("failed to marshal write request for time series %d: %w", i+1, err))
+			continue
+		}
+
+		// Compress with snappy
+		compressed := snappy.Encode(nil, data)
+
+		// Create HTTP request
+		req, err := http.NewRequestWithContext(ctx, "POST", p.endpoint, bytes.NewReader(compressed))
+		if err != nil {
+			errors = append(errors, fmt.Errorf("failed to create request for time series %d: %w", i+1, err))
+			continue
+		}
+
+		// Set headers
+		req.Header.Set("Content-Type", "application/x-protobuf")
+		req.Header.Set("Content-Encoding", "snappy")
+		req.Header.Set("X-Prometheus-Remote-Write-Version", "0.1.0")
+
+		// Add basic auth header if configured
+		if p.basicAuth != "" {
+			req.Header.Set("Authorization", p.basicAuth)
+		}
+
+		// Send request
+		resp, err := p.httpClient.Do(req)
+		if err != nil {
+			errors = append(errors, fmt.Errorf("failed to send request for time series %d: %w", i+1, err))
+			continue
+		}
+
+		// Check response status
+		if resp.StatusCode >= 400 {
+			errors = append(errors, fmt.Errorf("time series %d: Prometheus remote write returned status %d", i+1, resp.StatusCode))
+			resp.Body.Close()
+			continue
+		}
+
+		resp.Body.Close()
+		successCount++
 	}
 
-	// Compress with snappy
-	compressed := snappy.Encode(nil, data)
-
-	// Create HTTP request
-	req, err := http.NewRequestWithContext(ctx, "POST", p.endpoint, bytes.NewReader(compressed))
-	if err != nil {
-		return fmt.Errorf("failed to create request: %w", err)
+	// Return consolidated result
+	if len(errors) > 0 {
+		if successCount == 0 {
+			// All failed
+			return fmt.Errorf("all %d time series failed to write: %v", totalCount, errors)
+		} else {
+			// Partial success
+			return fmt.Errorf("partial success: %d/%d time series written successfully, failures: %v", successCount, totalCount, errors)
+		}
 	}
 
-	// Set headers
-	req.Header.Set("Content-Type", "application/x-protobuf")
-	req.Header.Set("Content-Encoding", "snappy")
-	req.Header.Set("X-Prometheus-Remote-Write-Version", "0.1.0")
-
-	// Add basic auth header if configured
-	if p.basicAuth != "" {
-		req.Header.Set("Authorization", p.basicAuth)
-	}
-
-	// Send request
-	resp, err := p.httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("failed to send request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode >= 400 {
-		return fmt.Errorf("Prometheus remote write returned status %d", resp.StatusCode)
-	}
-
+	// All succeeded
 	return nil
 }
 

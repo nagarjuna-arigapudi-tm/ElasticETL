@@ -344,28 +344,34 @@ func (g *GEMStream) Load(ctx context.Context, results []*transform.TransformedRe
 	}
 
 	// Convert results to Prometheus remote write format
-	samples := g.convertToPrometheusSamples(results)
-	if len(samples) == 0 {
+	timeSeries := g.convertToPrometheusTimeSeries(results)
+	if len(timeSeries) == 0 {
 		return nil
 	}
 
-	// Create remote write request
-	writeRequest := map[string]interface{}{
-		"timeseries": samples,
+	// Create WriteRequest
+	writeRequest := &prompb.WriteRequest{}
+	for _, ts := range timeSeries {
+		writeRequest.Timeseries = append(writeRequest.Timeseries, *ts)
 	}
 
-	jsonData, err := json.Marshal(writeRequest)
+	// Marshal to protobuf
+	data, err := writeRequest.Marshal()
 	if err != nil {
-		return fmt.Errorf("failed to marshal prometheus data: %w", err)
+		return fmt.Errorf("failed to marshal write request: %w", err)
 	}
+
+	// Compress with snappy
+	compressed := snappy.Encode(nil, data)
 
 	// Send to GEM endpoint
-	req, err := http.NewRequestWithContext(ctx, "POST", g.endpoint, bytes.NewBuffer(jsonData))
+	req, err := http.NewRequestWithContext(ctx, "POST", g.endpoint, bytes.NewReader(compressed))
 	if err != nil {
 		return fmt.Errorf("failed to create request: %w", err)
 	}
 
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Content-Type", "application/x-protobuf")
+	req.Header.Set("Content-Encoding", "snappy")
 	req.Header.Set("X-Prometheus-Remote-Write-Version", "0.1.0")
 
 	resp, err := g.httpClient.Do(req)
@@ -379,6 +385,150 @@ func (g *GEMStream) Load(ctx context.Context, results []*transform.TransformedRe
 	}
 
 	return nil
+}
+
+// convertToPrometheusTimeSeries converts transformed results to Prometheus time series using CSV data
+func (g *GEMStream) convertToPrometheusTimeSeries(results []*transform.TransformedResult) []*prompb.TimeSeries {
+	var timeSeries []*prompb.TimeSeries
+
+	for _, result := range results {
+		// Use CSV data to create time series if available and metrics are configured
+		if len(result.CSVData) > 0 && len(g.metrics) > 0 {
+			// Generate time series for each metric using CSV data
+			for _, metric := range g.metrics {
+				metricTimeSeries := g.createTimeSeriesForMetric(result.CSVData, metric)
+				timeSeries = append(timeSeries, metricTimeSeries...)
+			}
+			continue
+		}
+
+		// Fallback to old behavior using TransformedData
+		timestamp := result.Timestamp.UnixMilli()
+		for key, value := range result.TransformedData {
+			// Only include numeric values as metrics
+			if numValue, ok := g.toFloat64(value); ok {
+				// Create labels
+				var labels []prompb.Label
+				labels = append(labels, prompb.Label{Name: "__name__", Value: key})
+				labels = append(labels, prompb.Label{Name: "source", Value: result.Source})
+
+				// Add cluster name from metadata if available
+				if clusterName, ok := safeString(result.Metadata["cluster_name"]); ok && clusterName != "" {
+					labels = append(labels, prompb.Label{Name: "cluster", Value: clusterName})
+				}
+
+				// Add configured labels
+				for labelKey, labelValue := range g.labels {
+					labels = append(labels, prompb.Label{Name: labelKey, Value: labelValue})
+				}
+
+				// Create time series
+				ts := &prompb.TimeSeries{
+					Labels: labels,
+					Samples: []prompb.Sample{
+						{
+							Value:     numValue,
+							Timestamp: timestamp,
+						},
+					},
+				}
+				timeSeries = append(timeSeries, ts)
+			}
+		}
+	}
+
+	return timeSeries
+}
+
+// createTimeSeriesForMetric creates Prometheus remote write time series for a specific metric using CSV data
+func (g *GEMStream) createTimeSeriesForMetric(csvData [][]string, metric config.PrometheusMetricConfig) []*prompb.TimeSeries {
+	var timeSeries []*prompb.TimeSeries
+
+	// Group CSV rows by unique field combinations
+	uniqueGroups := make(map[string][]map[string]interface{})
+
+	for _, row := range csvData {
+		// Check bounds for required columns
+		if metric.Value >= len(row) || metric.Timestamp >= len(row) {
+			continue // Skip rows that don't have required columns
+		}
+
+		// Create unique key from uniqueFieldsIndex with bounds checking
+		var keyParts []string
+		for _, idx := range metric.UniqueFieldsIndex {
+			if idx >= 0 && idx < len(row) {
+				keyParts = append(keyParts, row[idx])
+			}
+		}
+		uniqueKey := strings.Join(keyParts, "|")
+
+		// Parse value and timestamp with bounds checking
+		value, ok := g.parseFloat(row[metric.Value])
+		if !ok {
+			continue
+		}
+
+		timestamp, ok := g.parseInt64(row[metric.Timestamp])
+		if !ok {
+			continue
+		}
+
+		// Create sample
+		sample := map[string]interface{}{
+			"value":     value,
+			"timestamp": timestamp,
+			"row":       row,
+		}
+
+		uniqueGroups[uniqueKey] = append(uniqueGroups[uniqueKey], sample)
+	}
+
+	// Generate time series for each unique group
+	for _, groupSamples := range uniqueGroups {
+		if len(groupSamples) == 0 {
+			continue
+		}
+
+		// Build labels from first sample in group
+		firstSample := groupSamples[0]
+		row := firstSample["row"].([]string)
+
+		var labels []prompb.Label
+		labels = append(labels, prompb.Label{Name: "__name__", Value: metric.Name})
+
+		// Add dynamic labels with bounds checking
+		for _, label := range metric.Labels {
+			if label.StaticValue != "" {
+				labels = append(labels, prompb.Label{Name: label.LabelName, Value: label.StaticValue})
+			} else if label.IndexInCSVData >= 0 && label.IndexInCSVData < len(row) {
+				labels = append(labels, prompb.Label{Name: label.LabelName, Value: row[label.IndexInCSVData]})
+			}
+		}
+
+		// Add configured labels
+		for labelKey, labelValue := range g.labels {
+			labels = append(labels, prompb.Label{Name: labelKey, Value: labelValue})
+		}
+
+		// Create samples array for this time series
+		var samples []prompb.Sample
+		for _, sample := range groupSamples {
+			samples = append(samples, prompb.Sample{
+				Value:     sample["value"].(float64),
+				Timestamp: sample["timestamp"].(int64),
+			})
+		}
+
+		// Create time series
+		ts := &prompb.TimeSeries{
+			Labels:  labels,
+			Samples: samples,
+		}
+
+		timeSeries = append(timeSeries, ts)
+	}
+
+	return timeSeries
 }
 
 // convertToPrometheusSamples converts transformed results to Prometheus samples using CSV data
@@ -1462,11 +1612,12 @@ func (c *CSVStream) GetType() string {
 
 // PrometheusRemoteWriteStream handles loading to Prometheus using remote write protocol
 type PrometheusRemoteWriteStream struct {
-	endpoint   string
-	httpClient *http.Client
-	labels     map[string]string
-	metrics    []config.PrometheusMetricConfig
-	basicAuth  string
+	endpoint      string
+	httpClient    *http.Client
+	labels        map[string]string
+	metrics       []config.PrometheusMetricConfig
+	basicAuth     string
+	clientLibrary string // "native" (default) or "m3dbx"
 }
 
 // NewPrometheusRemoteWriteStream creates a new Prometheus remote write stream
@@ -1487,6 +1638,17 @@ func NewPrometheusRemoteWriteStream(config map[string]interface{}, labels map[st
 		}
 	}
 
+	// Parse client library configuration (default to "native")
+	clientLibrary := "native"
+	if cl, ok := safeString(config["client_library"]); ok {
+		switch cl {
+		case "native", "m3dbx":
+			clientLibrary = cl
+		default:
+			return nil, fmt.Errorf("unsupported client_library '%s', supported values: 'native', 'm3dbx'", cl)
+		}
+	}
+
 	// Configure HTTP client with TLS settings
 	transport := &http.Transport{}
 	if insecureTLS {
@@ -1496,9 +1658,10 @@ func NewPrometheusRemoteWriteStream(config map[string]interface{}, labels map[st
 	}
 
 	stream := &PrometheusRemoteWriteStream{
-		endpoint: endpoint,
-		labels:   labels,
-		metrics:  metrics,
+		endpoint:      endpoint,
+		labels:        labels,
+		metrics:       metrics,
+		clientLibrary: clientLibrary,
 		httpClient: &http.Client{
 			Timeout:   timeout,
 			Transport: transport,
@@ -1532,6 +1695,17 @@ func (p *PrometheusRemoteWriteStream) Load(ctx context.Context, results []*trans
 		return nil
 	}
 
+	// Use different client library based on configuration
+	switch p.clientLibrary {
+	case "m3dbx":
+		return p.loadWithM3DBX(ctx, timeSeries)
+	default: // "native"
+		return p.loadWithNative(ctx, timeSeries)
+	}
+}
+
+// loadWithNative loads data using the native Prometheus remote write implementation
+func (p *PrometheusRemoteWriteStream) loadWithNative(ctx context.Context, timeSeries []*prompb.TimeSeries) error {
 	// Create WriteRequest
 	writeRequest := &prompb.WriteRequest{}
 	for _, ts := range timeSeries {
@@ -1575,6 +1749,22 @@ func (p *PrometheusRemoteWriteStream) Load(ctx context.Context, results []*trans
 	}
 
 	return nil
+}
+
+// loadWithM3DBX loads data using the m3dbx Prometheus remote client golang library
+func (p *PrometheusRemoteWriteStream) loadWithM3DBX(ctx context.Context, timeSeries []*prompb.TimeSeries) error {
+	// TODO: Implement m3dbx client integration
+	// This would require importing the m3dbx Prometheus_remote_client_golang library
+	// and using its client to perform the remote write operation
+
+	// For now, return an error indicating the feature is not yet implemented
+	return fmt.Errorf("m3dbx client library integration is not yet implemented - please use 'native' client_library or leave unspecified")
+
+	// Example of what the implementation might look like:
+	// 1. Create m3dbx client with endpoint and auth configuration
+	// 2. Convert timeSeries to m3dbx format if needed
+	// 3. Use m3dbx client to write the time series data
+	// 4. Handle any m3dbx-specific errors and return appropriate error messages
 }
 
 // convertToPrometheusTimeSeries converts transformed results to Prometheus time series using CSV data

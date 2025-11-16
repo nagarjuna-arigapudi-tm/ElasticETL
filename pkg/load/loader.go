@@ -297,10 +297,12 @@ func createStream(cfg config.StreamConfig, metrics []config.PrometheusMetricConf
 
 // GEMStream handles loading to GEM with Prometheus remote write
 type GEMStream struct {
-	endpoint   string
-	httpClient *http.Client
-	labels     map[string]string
-	metrics    []config.PrometheusMetricConfig
+	endpoint      string
+	httpClient    *http.Client
+	labels        map[string]string
+	metrics       []config.PrometheusMetricConfig
+	clientLibrary string // "native" (default) or "m3dbx"
+	basicAuth     string
 }
 
 // NewGEMStream creates a new GEM stream
@@ -317,6 +319,17 @@ func NewGEMStream(config map[string]interface{}, labels map[string]string, insec
 		}
 	}
 
+	// Parse client library configuration (default to "native")
+	clientLibrary := "native"
+	if cl, ok := safeString(config["client_library"]); ok {
+		switch cl {
+		case "native", "m3dbx":
+			clientLibrary = cl
+		default:
+			return nil, fmt.Errorf("unsupported client_library '%s', supported values: 'native', 'm3dbx'", cl)
+		}
+	}
+
 	// Configure HTTP client with TLS settings
 	transport := &http.Transport{}
 	if insecureTLS {
@@ -325,15 +338,25 @@ func NewGEMStream(config map[string]interface{}, labels map[string]string, insec
 		}
 	}
 
-	return &GEMStream{
-		endpoint: endpoint,
-		labels:   labels,
-		metrics:  metrics,
+	stream := &GEMStream{
+		endpoint:      endpoint,
+		labels:        labels,
+		metrics:       metrics,
+		clientLibrary: clientLibrary,
 		httpClient: &http.Client{
 			Timeout:   timeout,
 			Transport: transport,
 		},
-	}, nil
+	}
+
+	// Parse basic auth configuration
+	basicAuth, err := parseBasicAuth(config)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse basic auth: %w", err)
+	}
+	stream.basicAuth = basicAuth
+
+	return stream, nil
 }
 
 // Load loads data to GEM
@@ -345,6 +368,21 @@ func (g *GEMStream) Load(ctx context.Context, results []*transform.TransformedRe
 
 	// Convert results to Prometheus remote write format
 	timeSeries := g.convertToPrometheusTimeSeries(results)
+	if len(timeSeries) == 0 {
+		return nil
+	}
+
+	// Use different client library based on configuration
+	switch g.clientLibrary {
+	case "m3dbx":
+		return g.loadWithM3DBX(ctx, timeSeries)
+	default: // "native"
+		return g.loadWithNative(ctx, timeSeries)
+	}
+}
+
+// loadWithNative loads data using the native Prometheus remote write implementation
+func (g *GEMStream) loadWithNative(ctx context.Context, timeSeries []*prompb.TimeSeries) error {
 	if len(timeSeries) == 0 {
 		return nil
 	}
@@ -381,6 +419,11 @@ func (g *GEMStream) Load(ctx context.Context, results []*transform.TransformedRe
 		req.Header.Set("Content-Encoding", "snappy")
 		req.Header.Set("X-Prometheus-Remote-Write-Version", "0.1.0")
 
+		// Add basic auth header if configured
+		if g.basicAuth != "" {
+			req.Header.Set("Authorization", g.basicAuth)
+		}
+
 		resp, err := g.httpClient.Do(req)
 		if err != nil {
 			errors = append(errors, fmt.Errorf("failed to send request for time series %d: %w", i+1, err))
@@ -406,6 +449,110 @@ func (g *GEMStream) Load(ctx context.Context, results []*transform.TransformedRe
 		} else {
 			// Partial success
 			return fmt.Errorf("partial success: %d/%d time series written successfully, failures: %v", successCount, totalCount, errors)
+		}
+	}
+
+	// All succeeded
+	return nil
+}
+
+// loadWithM3DBX loads data using m3dbx-compatible Prometheus remote write implementation
+func (g *GEMStream) loadWithM3DBX(ctx context.Context, timeSeries []*prompb.TimeSeries) error {
+	if len(timeSeries) == 0 {
+		return nil
+	}
+
+	var errors []error
+	successCount := 0
+	totalCount := len(timeSeries)
+
+	// M3DBX client implementation using standard HTTP client with m3dbx-specific optimizations
+	// Send each time series individually with m3dbx-compatible headers and retry logic
+	for i, ts := range timeSeries {
+		// Create WriteRequest with single time series
+		writeRequest := &prompb.WriteRequest{
+			Timeseries: []prompb.TimeSeries{*ts},
+		}
+
+		// Marshal to protobuf
+		data, err := writeRequest.Marshal()
+		if err != nil {
+			errors = append(errors, fmt.Errorf("failed to marshal write request for time series %d: %w", i+1, err))
+			continue
+		}
+
+		// Compress with snappy
+		compressed := snappy.Encode(nil, data)
+
+		// Create HTTP request with m3dbx-compatible settings
+		req, err := http.NewRequestWithContext(ctx, "POST", g.endpoint, bytes.NewReader(compressed))
+		if err != nil {
+			errors = append(errors, fmt.Errorf("failed to create request for time series %d: %w", i+1, err))
+			continue
+		}
+
+		// Set m3dbx-compatible headers
+		req.Header.Set("Content-Type", "application/x-protobuf")
+		req.Header.Set("Content-Encoding", "snappy")
+		req.Header.Set("X-Prometheus-Remote-Write-Version", "0.1.0")
+		req.Header.Set("User-Agent", "elasticetl-m3dbx-client/1.0")
+
+		// Add basic auth header if configured
+		if g.basicAuth != "" {
+			req.Header.Set("Authorization", g.basicAuth)
+		}
+
+		// M3DBX-specific retry logic with exponential backoff
+		maxRetries := 3
+		var lastErr error
+
+		for retry := 0; retry <= maxRetries; retry++ {
+			resp, err := g.httpClient.Do(req)
+			if err != nil {
+				lastErr = err
+				if retry < maxRetries {
+					// Exponential backoff: 100ms, 200ms, 400ms
+					backoffDuration := time.Duration(100*(1<<retry)) * time.Millisecond
+					time.Sleep(backoffDuration)
+					continue
+				}
+				break
+			}
+
+			// Check response status
+			if resp.StatusCode >= 400 {
+				resp.Body.Close()
+				if resp.StatusCode >= 500 && retry < maxRetries {
+					// Retry on server errors
+					lastErr = fmt.Errorf("GEM returned status %d", resp.StatusCode)
+					backoffDuration := time.Duration(100*(1<<retry)) * time.Millisecond
+					time.Sleep(backoffDuration)
+					continue
+				}
+				lastErr = fmt.Errorf("GEM returned status %d", resp.StatusCode)
+				break
+			}
+
+			// Success
+			resp.Body.Close()
+			successCount++
+			lastErr = nil
+			break
+		}
+
+		if lastErr != nil {
+			errors = append(errors, fmt.Errorf("time series %d (m3dbx): %w", i+1, lastErr))
+		}
+	}
+
+	// Return consolidated result
+	if len(errors) > 0 {
+		if successCount == 0 {
+			// All failed
+			return fmt.Errorf("all %d time series failed to write (m3dbx): %v", totalCount, errors)
+		} else {
+			// Partial success
+			return fmt.Errorf("partial success (m3dbx): %d/%d time series written successfully, failures: %v", successCount, totalCount, errors)
 		}
 	}
 

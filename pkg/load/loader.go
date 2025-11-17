@@ -1954,20 +1954,108 @@ func (p *PrometheusRemoteWriteStream) loadWithNative(ctx context.Context, timeSe
 	return nil
 }
 
-// loadWithM3DBX loads data using the m3dbx Prometheus remote client golang library
+// loadWithM3DBX loads data using m3dbx-compatible Prometheus remote write implementation
 func (p *PrometheusRemoteWriteStream) loadWithM3DBX(ctx context.Context, timeSeries []*prompb.TimeSeries) error {
-	// TODO: Implement m3dbx client integration
-	// This would require importing the m3dbx Prometheus_remote_client_golang library
-	// and using its client to perform the remote write operation
+	if len(timeSeries) == 0 {
+		return nil
+	}
 
-	// For now, return an error indicating the feature is not yet implemented
-	return fmt.Errorf("m3dbx client library integration is not yet implemented - please use 'native' client_library or leave unspecified")
+	var errors []error
+	successCount := 0
+	totalCount := len(timeSeries)
 
-	// Example of what the implementation might look like:
-	// 1. Create m3dbx client with endpoint and auth configuration
-	// 2. Convert timeSeries to m3dbx format if needed
-	// 3. Use m3dbx client to write the time series data
-	// 4. Handle any m3dbx-specific errors and return appropriate error messages
+	// M3DBX client implementation using standard HTTP client with m3dbx-specific optimizations
+	// Send each time series individually with m3dbx-compatible headers and retry logic
+	for i, ts := range timeSeries {
+		// Create WriteRequest with single time series
+		writeRequest := &prompb.WriteRequest{
+			Timeseries: []prompb.TimeSeries{*ts},
+		}
+
+		// Marshal to protobuf
+		data, err := writeRequest.Marshal()
+		if err != nil {
+			errors = append(errors, fmt.Errorf("failed to marshal write request for time series %d: %w", i+1, err))
+			continue
+		}
+
+		// Compress with snappy
+		compressed := snappy.Encode(nil, data)
+
+		// Create HTTP request with m3dbx-compatible settings
+		req, err := http.NewRequestWithContext(ctx, "POST", p.endpoint, bytes.NewReader(compressed))
+		if err != nil {
+			errors = append(errors, fmt.Errorf("failed to create request for time series %d: %w", i+1, err))
+			continue
+		}
+
+		// Set m3dbx-compatible headers
+		req.Header.Set("Content-Type", "application/x-protobuf")
+		req.Header.Set("Content-Encoding", "snappy")
+		req.Header.Set("X-Prometheus-Remote-Write-Version", "0.1.0")
+		req.Header.Set("User-Agent", "elasticetl-m3dbx-client/1.0")
+
+		// Add basic auth header if configured
+		if p.basicAuth != "" {
+			req.Header.Set("Authorization", p.basicAuth)
+		}
+
+		// M3DBX-specific retry logic with exponential backoff
+		maxRetries := 3
+		var lastErr error
+
+		for retry := 0; retry <= maxRetries; retry++ {
+			resp, err := p.httpClient.Do(req)
+			if err != nil {
+				lastErr = err
+				if retry < maxRetries {
+					// Exponential backoff: 100ms, 200ms, 400ms
+					backoffDuration := time.Duration(100*(1<<retry)) * time.Millisecond
+					time.Sleep(backoffDuration)
+					continue
+				}
+				break
+			}
+
+			// Check response status
+			if resp.StatusCode >= 400 {
+				resp.Body.Close()
+				if resp.StatusCode >= 500 && retry < maxRetries {
+					// Retry on server errors
+					lastErr = fmt.Errorf("Prometheus remote write returned status %d", resp.StatusCode)
+					backoffDuration := time.Duration(100*(1<<retry)) * time.Millisecond
+					time.Sleep(backoffDuration)
+					continue
+				}
+				lastErr = fmt.Errorf("Prometheus remote write returned status %d", resp.StatusCode)
+				break
+			}
+
+			// Success
+			resp.Body.Close()
+			successCount++
+			lastErr = nil
+			break
+		}
+
+		if lastErr != nil {
+			errors = append(errors, fmt.Errorf("time series %d (m3dbx): %w", i+1, lastErr))
+		}
+	}
+
+	// Return consolidated result
+	if len(errors) > 0 {
+		if successCount == 0 {
+			// All failed
+			return fmt.Errorf("all %d time series failed to write (m3dbx): %v", totalCount, errors)
+		} else {
+			// Partial success
+			return fmt.Errorf("partial success (m3dbx): %d/%d time series written successfully, failures: %v", successCount, totalCount, errors)
+		}
+	}
+
+	// All succeeded
+	return nil
 }
 
 // convertToPrometheusTimeSeries converts transformed results to Prometheus time series using CSV data

@@ -349,12 +349,18 @@ func NewGEMStream(config map[string]interface{}, labels map[string]string, insec
 		},
 	}
 
-	// Parse basic auth configuration
-	basicAuth, err := parseBasicAuth(config)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse basic auth: %w", err)
+	// Handle authentication - prioritize auth_headers if provided, otherwise use auth_basic
+	if authHeader, ok := safeString(config["auth_header"]); ok && authHeader != "" {
+		// Use auth_headers (prioritized)
+		stream.basicAuth = substituteEnvVars(authHeader)
+	} else {
+		// Parse basic auth configuration as fallback
+		basicAuth, err := parseBasicAuth(config)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse basic auth: %w", err)
+		}
+		stream.basicAuth = basicAuth
 	}
-	stream.basicAuth = basicAuth
 
 	return stream, nil
 }
@@ -1134,12 +1140,18 @@ func NewPrometheusStream(config map[string]interface{}, labels map[string]string
 		}
 	}
 
-	// Parse basic auth configuration
-	basicAuth, err := parseBasicAuth(config)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse basic auth: %w", err)
+	// Handle authentication - prioritize auth_headers if provided, otherwise use auth_basic
+	if authHeader, ok := safeString(config["auth_header"]); ok && authHeader != "" {
+		// Use auth_headers (prioritized)
+		stream.basicAuth = substituteEnvVars(authHeader)
+	} else {
+		// Parse basic auth configuration as fallback
+		basicAuth, err := parseBasicAuth(config)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse basic auth: %w", err)
+		}
+		stream.basicAuth = basicAuth
 	}
-	stream.basicAuth = basicAuth
 
 	return stream, nil
 }
@@ -1841,12 +1853,18 @@ func NewPrometheusRemoteWriteStream(config map[string]interface{}, labels map[st
 		},
 	}
 
-	// Parse basic auth configuration
-	basicAuth, err := parseBasicAuth(config)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse basic auth: %w", err)
+	// Handle authentication - prioritize auth_headers if provided, otherwise use auth_basic
+	if authHeader, ok := safeString(config["auth_header"]); ok && authHeader != "" {
+		// Use auth_headers (prioritized)
+		stream.basicAuth = substituteEnvVars(authHeader)
+	} else {
+		// Parse basic auth configuration as fallback
+		basicAuth, err := parseBasicAuth(config)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse basic auth: %w", err)
+		}
+		stream.basicAuth = basicAuth
 	}
-	stream.basicAuth = basicAuth
 
 	return stream, nil
 }
